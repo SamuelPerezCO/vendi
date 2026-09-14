@@ -871,7 +871,8 @@ def inbox_thread(request, conversation_id: int):
     Targeted by the open thread's 5-second poll, which is how replies (and
     the fake provider's delivery receipts) appear without a refresh. Polling
     swaps only #chat-messages, so a half-typed draft in the composer below
-    is never clobbered.
+    is never clobbered -- except in the one moment the composer itself has
+    to change, when the 24h window has flipped (see below).
     """
     conversation = get_object_or_404(Conversation, pk=conversation_id)
 
@@ -883,13 +884,22 @@ def inbox_thread(request, conversation_id: int):
     # poll is read the moment it renders.
     _mark_read(conversation)
 
-    return HttpResponse(
-        render_to_string(
-            "partials/inbox/chat_messages.html",
-            _thread_context(conversation),
-            request=request,
+    context = _thread_context(conversation)
+    html = render_to_string("partials/inbox/chat_messages.html", context, request=request)
+
+    # The page reports which composer it is showing (chat_composer.html's
+    # #chat-window-state). If the 24h window has flipped since -- the
+    # customer just replied, or the silence ran past 24 hours -- the other
+    # composer rides along out-of-band, so the box unlocks (or locks) with
+    # nobody reopening the chat. Only then: an unchanged state never touches
+    # the composer, and a poll that reports nothing (an old tab, another
+    # caller) gets exactly the message list, as before.
+    shown = request.GET.get("window_open")
+    if shown in ("0", "1") and (shown == "1") != context["window_open"]:
+        html += render_to_string(
+            "partials/inbox/chat_composer.html", {**context, "oob": True}, request=request
         )
-    )
+    return HttpResponse(html)
 
 
 #: The thread's notice for a send WhatsApp took but never confirmed
