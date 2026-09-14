@@ -6,7 +6,10 @@
   to keep the open row highlighted across re-renders.
 
   #chat-messages polls its own contents every 5s -- only the messages, so a
-  half-typed draft in the composer below is never clobbered by the swap.
+  half-typed draft in the composer below is never clobbered by the swap. The
+  poll also reports which composer is on screen (it hx-includes
+  #chat-window-state, see chat_composer.html); when the 24h window has
+  flipped since, the answer carries the other composer out-of-band.
 
   Context: active_conversation, chat_messages, window_open
 {% endcomment %}
@@ -42,70 +45,12 @@
   <div class="chat-thread__messages" id="chat-messages"
        hx-get="{% url 'inbox_thread' active_conversation.pk %}"
        hx-trigger="every 5s"
+       hx-include="#chat-window-state"
        hx-swap="innerHTML">
     {% include "partials/inbox/chat_messages.html" %}
   </div>
 
-  {% if window_open %}
-    {# The response replaces only the thread above; after-request clears the input. #}
-    <form class="composer"
-          hx-post="{% url 'inbox_send' active_conversation.pk %}"
-          hx-target="#chat-messages"
-          hx-swap="innerHTML"
-          hx-on::after-request="if(event.detail.successful) this.reset()">
-      {% csrf_token %}
-      {% comment %}
-        The plantillas picker. details/summary gives the open/close for free;
-        the panel's contents load once, on first open (hx-trigger="toggle
-        once" -- the toggle event fires on the details element itself).
-        Picking an entry sends it into this chat -- the entries carry their
-        own hx-post to inbox_send, and hx-headers here is what supplies them
-        the CSRF token (they are buttons, not this form's submit). An entry
-        whose body still has a blank to fill falls back to loading the
-        composer instead; see quick_replies.html and shell.js.
-      {% endcomment %}
-      <details class="quickreplies" data-quickreplies
-               hx-get="{% url 'inbox_quick_replies' active_conversation.pk %}"
-               hx-trigger="toggle once"
-               hx-target="find [data-quickreplies-pop]"
-               hx-swap="innerHTML"
-               hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
-        <summary class="composer__quick">
-          {% include "icons/zap.svg" %}
-          <span>Respuestas rápidas</span>
-        </summary>
-        <div class="quickreplies__pop" data-quickreplies-pop
-             role="menu" aria-label="Respuestas rápidas">
-          <p class="quickreplies__empty">Cargando…</p>
-        </div>
-      </details>
-      {% include "partials/inbox/template_send_button.html" %}
-      <input class="field__input composer__input" type="text" name="body"
-             placeholder="Escribe un mensaje" autocomplete="off" required
-             aria-label="Escribe un mensaje">
-      <button type="submit" class="btn-primary">Enviar</button>
-    </form>
-  {% else %}
-{% comment %}
-      WhatsApp's 24h rule, surfaced as the one thing that IS allowed: a
-      plantilla. The button opens the send dialog, where the agent fills the
-      plantilla's {{n}} for THIS customer -- the editor's sample values are
-      examples for Meta's reviewer, not something to greet anyone with. The
-      customer's reply is what reopens the window and brings the normal
-      composer back on the next poll/click.
-    {% endcomment %}
-    <div class="composer composer--closed">
-      <div class="composer__notice">
-        {% include "icons/info.svg" %}
-        <p>
-          La ventana de 24 horas está cerrada. Puedes retomar la conversación
-          enviando una plantilla aprobada; cuando el cliente responda, vuelve
-          el chat libre.
-        </p>
-      </div>
-      {% include "partials/inbox/template_send_button.html" %}
-    </div>
-  {% endif %}
+  {% include "partials/inbox/chat_composer.html" %}
 
   {# The Enviar plantilla dialog lands here, fetched fresh on every open. #}
   <div id="tpl-send-slot"></div>

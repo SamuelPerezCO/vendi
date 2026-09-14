@@ -13,6 +13,7 @@ from core.models import Client, MessageTemplate
 from messaging import services as messaging_services
 from messaging.models import Conversation, Message
 from messaging.providers.fake import FakeProvider
+from messaging.providers.types import InboundEvent
 
 
 def template(name="saludo_inicial", body="Hola {{1}}, ¿en qué te ayudo?",
@@ -233,6 +234,72 @@ class ClosedComposerTests(TestCase):
         self.assertIn('name="body"', html)
         # The plantilla path never depends on which state the thread is in.
         self.assertIn("Enviar plantilla", html)
+
+
+class ComposerFollowsTheWindowTests(TestCase):
+    """The open thread's 5-second poll unlocks the composer the moment the
+    customer replies, and locks it when 24 hours run out -- nobody has to
+    reopen the chat. It never re-renders the composer otherwise: a
+    half-typed draft must survive every ordinary poll."""
+
+    def setUp(self):
+        self.contact = client()
+        self.conversation = Conversation.objects.create(
+            contact=self.contact, channel="whatsapp",
+            last_inbound_at=timezone.now() - timedelta(hours=30),
+        )
+        self.url = reverse("inbox_thread", args=[self.conversation.pk])
+
+    def poll(self, shown):
+        params = {} if shown is None else {"window_open": shown}
+        return self.client.get(self.url, params).content.decode()
+
+    def reply(self, body="Sí, me interesa"):
+        # Through the same service the webhook feeds, so the window opens
+        # exactly the way a real WhatsApp reply opens it.
+        messaging_services.process_inbound_events([InboundEvent(
+            event_type="message", provider_message_id="wamid.REPLY",
+            from_number=self.contact.phone, body=body,
+        )])
+
+    def test_the_thread_reports_which_composer_it_shows(self):
+        html = self.client.get(
+            reverse("inbox_chat", args=[self.conversation.pk])
+        ).content.decode()
+        self.assertIn('hx-include="#chat-window-state"', html)
+        self.assertIn('id="chat-window-state" name="window_open" value="0"', html)
+
+    def test_a_reply_unlocks_the_composer_on_the_next_poll(self):
+        template()
+        self.reply()
+        html = self.poll("0")
+        self.assertIn("Sí, me interesa", html)          # the message list, as before
+        self.assertIn('id="chat-composer" hx-swap-oob="outerHTML"', html)
+        self.assertIn('name="body"', html)               # free text is back
+        self.assertIn('id="chat-window-state" name="window_open" value="1"', html)
+
+    def test_the_window_running_out_locks_the_composer(self):
+        template()
+        html = self.poll("1")   # the page still shows free text; 30h have passed
+        self.assertIn('id="chat-composer" hx-swap-oob="outerHTML"', html)
+        self.assertIn("ventana de 24 horas", html)
+        self.assertNotIn('name="body"', html)
+        self.assertIn('id="chat-window-state" name="window_open" value="0"', html)
+
+    def test_an_unchanged_window_leaves_the_composer_alone(self):
+        self.assertNotIn("chat-composer", self.poll("0"))
+        self.reply()
+        self.assertNotIn("chat-composer", self.poll("1"))
+
+    def test_a_poll_that_reports_nothing_gets_only_the_messages(self):
+        self.reply()
+        html = self.poll(None)
+        self.assertNotIn("chat-composer", html)
+        self.assertIn("Sí, me interesa", html)
+
+    def test_anything_else_in_the_parameter_is_ignored(self):
+        self.reply()
+        self.assertNotIn("chat-composer", self.poll("yes"))
 
 
 class TemplateVariablesTests(TestCase):
