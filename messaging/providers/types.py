@@ -1,7 +1,7 @@
 """Provider-agnostic value types.
 
-Every provider's webhook payload -- Meta's nested JSON, the fake provider's
-flat JSON -- is normalized into these before the rest
+Every provider's webhook payload -- Meta's nested JSON -- is normalized
+into these before the rest
 of the app sees it. Nothing outside ``providers/`` should ever touch a raw
 provider payload.
 """
@@ -151,8 +151,8 @@ class TemplateVerdict:
 class InboundEvent:
     """One normalized event out of a webhook payload.
 
-    A single webhook request can carry many of these (Meta batches, the fake
-    provider's status ticks), which is why ``parse_webhook`` returns a list.
+    A single webhook request can carry many of these (Meta batches them),
+    which is why ``parse_webhook`` returns a list.
 
     Two shapes share the class, discriminated by ``event_type``:
 

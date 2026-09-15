@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Take the documentation screenshots and record where each red box goes.
 
-Needs a running dev server with demo data (MESSAGING_PROVIDER=fake) and a
+Needs a running dev server with demo data (MESSAGING_PROVIDER=meta) and a
 master user. Saves capturas/<pantalla>.png at 1440x900 and
 capturas/recuadros.json with, per screen, the rectangle of every element the
 document points at, as fractions of the image (so the PDF can draw the red

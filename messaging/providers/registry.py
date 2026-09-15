@@ -1,8 +1,9 @@
 """Which provider is live, decided by settings alone.
 
-Swapping fake -> Meta is a one-line change to
-``MESSAGING_PROVIDER`` (env var / settings); no code imports a concrete
-provider class except this module and the tests.
+Meta's Cloud API is the only provider the app has, and ``MESSAGING_PROVIDER``
+(env var / settings) still names it explicitly; no code imports a concrete
+provider class except this module and the tests. Under ``manage.py test`` a
+test-only stub joins the table (see ``messaging/testing.py``).
 """
 
 from __future__ import annotations
@@ -10,11 +11,9 @@ from __future__ import annotations
 from django.conf import settings
 
 from .base import MessagingProvider
-from .fake import FakeProvider
 from .meta import MetaProvider
 
 _PROVIDERS: dict[str, type[MessagingProvider]] = {
-    FakeProvider.name: FakeProvider,
     MetaProvider.name: MetaProvider,
 }
 
@@ -36,31 +35,7 @@ def get_provider(name: str | None = None) -> MessagingProvider:
 
 
 def is_known_provider(name: str) -> bool:
+    """Whether ``name`` is a provider this app has. The webhook answers 404
+    for anything else -- including ``fake``, the retired simulator whose
+    endpoint turned any request body into customers."""
     return name in _PROVIDERS
-
-
-#: Providers that exist only for local development. They mint contacts,
-#: conversations and messages straight out of the request body, with no real
-#: account behind them -- see :func:`is_enabled_provider`.
-_DEV_ONLY = frozenset({FakeProvider.name})
-
-
-def is_enabled_provider(name: str) -> bool:
-    """Whether ``name`` may answer a webhook in *this* environment.
-
-    Real providers stay routable even when another one is active: a status
-    callback for a message sent last week must still parse with the provider
-    that sent it halfway through a migration, which is why the webhook URL
-    names the provider instead of reading the setting.
-
-    The fake provider is the exception. It invents whatever the request body
-    says, so on a deployment running a real provider its endpoint is simply
-    an unauthenticated writer into the production database -- and the rows it
-    creates are indistinguishable from real customers afterwards. It answers
-    only where it is itself the configured provider.
-    """
-    if not is_known_provider(name):
-        return False
-    if name in _DEV_ONLY:
-        return settings.MESSAGING_PROVIDER == name
-    return True

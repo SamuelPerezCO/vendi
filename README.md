@@ -32,7 +32,10 @@ python manage.py runserver
 
 El paso del `.env` no es opcional: `MESSAGING_PROVIDER` es obligatorio y la
 app no arranca sin él (ver [Mensajería](#mensajería-cambiar-de-proveedor)).
-Para desarrollo local el `.env.example` ya trae `MESSAGING_PROVIDER=fake`.
+El `.env.example` ya trae `MESSAGING_PROVIDER=meta`: para recorrer las
+pantallas no hacen falta credenciales, pero para enviar mensajes sí, y esos
+mensajes llegan a teléfonos reales (la cuenta de Meta ofrece un número de
+prueba).
 
 Abre http://127.0.0.1:8000/ — la pantalla de bienvenida enlaza a Inbox, CRM y Embudos.
 
@@ -163,20 +166,23 @@ equipo.
 
 ## Mensajería: cambiar de proveedor
 
-Toda la integración con WhatsApp vive en [messaging/](messaging/) detrás de una abstracción de proveedor ([messaging/providers/base.py](messaging/providers/base.py)). El proveedor activo lo decide **una sola variable**:
+Toda la integración con WhatsApp vive en [messaging/](messaging/) detrás de una abstracción de proveedor ([messaging/providers/base.py](messaging/providers/base.py)). El proveedor activo lo decide **una sola variable**, que hoy tiene un único valor posible:
 
 ```
-MESSAGING_PROVIDER=meta    # producción: la Cloud API de Meta
-MESSAGING_PROVIDER=fake    # solo desarrollo local: simula envíos y recibos
+MESSAGING_PROVIDER=meta    # la Cloud API de Meta
 ```
 
-La variable es **obligatoria**: sin ella la app no arranca. Antes `fake` era
-el valor por defecto, y un despliegue al que se le olvidara la variable
-corría feliz sobre el simulador -- palomitas moviéndose en pantalla, nada
-llegando a un teléfono. Producción es clientes reales; no debe poder caer en
-el simulador por accidente.
+La variable es **obligatoria**: sin ella la app no arranca. Antes existía un
+simulador, `fake`, que además era el valor por defecto, y un despliegue al
+que se le olvidara la variable corría feliz sobre él -- palomitas moviéndose
+en pantalla, nada llegando a un teléfono. El simulador ya no existe: un
+`.env` que todavía diga `MESSAGING_PROVIDER=fake` hace que la app se niegue a
+arrancar con un mensaje claro, y `/webhooks/messaging/fake/` devuelve 404
+([messaging/providers/registry.py](messaging/providers/registry.py)).
 
-El webhook del proveedor `fake` (`/webhooks/messaging/fake/`) crea contactos y conversaciones y su única llave es `MESSAGING_FAKE_SECRET`, cuyo valor por defecto está publicado en este repositorio. Por eso solo responde donde los datos falsos tienen sentido: con `DEBUG=True` o bajo `manage.py test`. En un despliegue real devuelve 404, así que nadie puede meter clientes inventados en el Inbox ([messaging/providers/registry.py](messaging/providers/registry.py)). El webhook de Meta no cambia.
+Los tests nunca hablan con Meta: bajo `manage.py test` los envíos pasan por
+un proveedor de prueba que vive en [messaging/testing.py](messaging/testing.py)
+y solo existe mientras corren los tests.
 
 Para conectar la cuenta real de Meta:
 
@@ -317,7 +323,7 @@ En el dashboard del proyecto (Settings → Environment Variables) define, como m
 
 - `SECRET_KEY` — cualquier string largo y aleatorio (sin esto usa un valor de desarrollo inseguro).
 - `DEBUG=False`
-- `MESSAGING_PROVIDER` — **obligatorio**, y en producción nunca `fake`: `meta`, con las credenciales de la Cloud API. Sin esta variable el despliegue falla al arrancar, a propósito.
+- `MESSAGING_PROVIDER` — **obligatorio**: `meta`, con las credenciales de la Cloud API. Sin esta variable, o con un valor que la app no tiene, el despliegue falla al arrancar, a propósito.
 - `DATABASE_URL` — Postgres (por ejemplo Vercel Postgres o Neon, desde la pestaña Storage). SQLite no sirve en producción porque las funciones serverless no tienen disco persistente.
 - `ALLOWED_HOSTS` — opcional; el dominio del deploy y el alias de producción se confían automáticamente vía `VERCEL_URL` y `VERCEL_PROJECT_PRODUCTION_URL`, agrega aquí solo dominios propios (custom domains).
 - `PUBLIC_BASE_URL` — el **único** origen público, `https://` + el dominio de producción (hoy `https://mvp-crm-lake.vercel.app`). Es lo que va en el link de imagen que se le entrega a WhatsApp en una respuesta rápida con foto: Meta lo descarga desde sus servidores, sin sesión, y todos los alias del proyecto salvo el dominio de producción están detrás del SSO de Vercel — un link a cualquiera de ellos hace que el envío falle unos segundos después de aceptado. Por defecto sale de `VERCEL_PROJECT_PRODUCTION_URL`; `manage.py check` avisa si queda vacío (`core.W002`) o apunta a un alias protegido (`core.W003`), y cada build imprime el valor resuelto.
@@ -326,14 +332,12 @@ Las migraciones corren solas en cada deploy de producción ([vercel_build.sh](ve
 
 Los archivos estáticos (`static/`) se recolectan y sirven automáticamente desde el CDN de Vercel — no requiere WhiteNoise ni configuración adicional. Los uploads de usuario (fotos de respuestas rápidas, cabeceras de plantillas, imágenes que llegan por WhatsApp) no pueden ir al filesystem de las funciones, que es de solo lectura: con un Blob store conectado (Storage → Blob; inyecta `BLOB_READ_WRITE_TOKEN`) van a Vercel Blob, y sin él van a la propia base de datos y se sirven desde `/archivos/<token>/…` ([core/storage.py](core/storage.py)). Conectar Blob después no rompe lo ya guardado.
 
-En Vercel el proveedor que funciona tal cual es `meta`; `fake` no es una opción de producción — simula los envíos y no manda nada a ningún teléfono.
-
 ### Seguridad del webhook
 
 La URL del webhook nombra al proveedor (`/webhooks/messaging/<proveedor>/`) para que, durante una migración entre proveedores, cada callback se siga interpretando con el proveedor que lo envió aunque el activo ya sea otro. Dos consecuencias que conviene tener presentes:
 
-- El endpoint del proveedor `fake` **solo responde donde `MESSAGING_PROVIDER=fake`**. En un despliegue real devuelve 404: sin ese candado sería una forma anónima de escribir clientes inventados en la base de datos de producción, indistinguibles después de los reales.
-- Cada proveedor real *sí* sigue siendo alcanzable siempre, así que su secreto es lo único que lo protege. Ninguno tiene valor por defecto: `META_APP_SECRET` y `MESSAGING_FAKE_SECRET` rechazan todo mientras estén vacíos. Un secreto escrito en el repositorio no protege nada.
+- Un nombre que la app no tiene devuelve 404, incluido `/webhooks/messaging/fake/`: el simulador que antes respondía ahí creaba clientes inventados a partir del cuerpo de la petición, indistinguibles después de los reales, y ya no existe.
+- El webhook de Meta *sí* es alcanzable siempre, así que su secreto es lo único que lo protege. `META_APP_SECRET` no tiene valor por defecto y rechaza todo mientras esté vacío. Un secreto escrito en el repositorio no protege nada.
 
 ## Tests
 
@@ -362,7 +366,7 @@ Un *panel* es la parte de la pantalla que cambia al elegir una opción del menú
 | [messaging/management/](messaging/management/) | Contenedor de los comandos de consola de mensajería. |
 | [messaging/management/commands/](messaging/management/commands/) | Comandos: go_live, meta_spend, reset_conversations y sync_template_status. |
 | [messaging/migrations/](messaging/migrations/) | Cambios de la base de datos de mensajería. |
-| [messaging/providers/](messaging/providers/) | Conexión con WhatsApp: Meta y el simulador fake. |
+| [messaging/providers/](messaging/providers/) | Conexión con WhatsApp: la Cloud API de Meta. |
 | [static/](static/) | Archivos que el navegador descarga tal cual. |
 | [static/css/](static/css/) | Estilos de cada sección. |
 | [static/js/](static/js/) | JavaScript propio: navegación, calendario y gráficas. |

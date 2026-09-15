@@ -25,7 +25,7 @@ from .types import InboundEvent, TemplateSpec, TemplateVerdict
 
 
 class MessagingProvider(ABC):
-    """One messaging backend (Meta Cloud API, fake...)."""
+    """One messaging backend. Meta's Cloud API is the only one today."""
 
     #: Registry key and URL slug: ``/webhooks/messaging/<name>/``.
     name: str = ""
@@ -49,13 +49,8 @@ class MessagingProvider(ABC):
         """Send a pre-approved template message. The only way to reach someone
         outside the 24-hour window. Returns the provider's message id.
 
-        ``params`` fills the template's placeholders. Two reserved keys ride
-        in it for providers that have no template mechanism of their own and
-        must fall back to plain text: ``_language`` (the language code) and
-        ``_rendered`` (the body with its sample values already substituted --
-        what the CRM shows in the thread). A provider with real template
-        support ignores ``_rendered``; one without it sends exactly that
-        string, so the customer reads the message rather than its name.
+        ``params`` fills the template's placeholders. One reserved key rides
+        in it: ``_language``, the plantilla's language code.
         """
 
     def send_image(self, to: str, image_url: str, caption: str = "") -> str:
@@ -89,22 +84,18 @@ class MessagingProvider(ABC):
         ``hub.challenge`` to echo; other providers never GET the webhook."""
         return None
 
-    # --- Template catalogue (optional) ---------------------------------------
+    # --- Template catalogue --------------------------------------------------
     #
-    # Only the official Cloud API keeps a catalogue of templates that must be
-    # submitted and approved before ``send_template`` will accept them. The
-    # defaults below are the "no catalogue" answer, so the fake provider
-    # inherits them untouched --
-    # same stance as ``handshake``.
+    # WhatsApp sends only templates its catalogue has approved, so every
+    # provider submits plantillas for review and reports the verdicts back.
 
-    def create_template(self, spec: TemplateSpec) -> str | None:
+    @abstractmethod
+    def create_template(self, spec: TemplateSpec) -> str:
         """Submit ``spec`` for approval. Returns the provider's id for the new
-        template, or ``None`` when this provider has no catalogue to submit
-        to (the CRM then simply keeps its own record). Raise on a rejected or
-        failed submission -- the caller reports it, never guesses."""
-        return None
+        template. Raise on a rejected or failed submission -- the caller
+        reports it, never guesses."""
 
+    @abstractmethod
     def template_verdicts(self) -> list[TemplateVerdict]:
         """Every template in the provider's catalogue with its current
-        approval state, normalized. Empty when there is no catalogue."""
-        return []
+        approval state, normalized."""

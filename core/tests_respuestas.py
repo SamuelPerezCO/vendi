@@ -15,7 +15,7 @@ from core.models import Client, QuickReply
 from messaging import services as messaging_services
 from messaging.models import Conversation, Message
 from messaging.providers.base import MessagingProvider
-from messaging.providers.fake import FakeProvider
+from messaging.testing import StubProvider
 
 PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
@@ -288,7 +288,7 @@ class QuickSendTests(TestCase):
     @override_settings(PUBLIC_BASE_URL="")
     def test_an_image_reply_sends_the_image_with_the_text_as_caption(self):
         row = reply(title="Lista", body="Precios de hoy", image=png())
-        with mock.patch.object(FakeProvider, "send_image", return_value="fake-img-1") as send:
+        with mock.patch.object(StubProvider, "send_image", return_value="stub-img-1") as send:
             self.client.post(self.url, {"quick_reply": row.pk})
         send.assert_called_once()
         kwargs = send.call_args.kwargs
@@ -315,7 +315,7 @@ class QuickSendTests(TestCase):
         receives, and what the thread stores, when an origin is configured.
         """
         row = reply(title="Promo", body="Foto", image=png())
-        with mock.patch.object(FakeProvider, "send_image", return_value="fake-img-2") as send:
+        with mock.patch.object(StubProvider, "send_image", return_value="stub-img-2") as send:
             self.client.post(self.url, {"quick_reply": row.pk}, HTTP_HOST="testserver")
         expected = "https://crm.example.com" + row.image.url
         self.assertEqual(send.call_args.kwargs["image_url"], expected)
@@ -349,7 +349,7 @@ class QuickSendTests(TestCase):
 class SendImageServiceTests(TestCase):
     def test_send_message_with_image_records_media_and_calls_send_image(self):
         chat = conversation()
-        with mock.patch.object(FakeProvider, "send_image", return_value="id-1") as send:
+        with mock.patch.object(StubProvider, "send_image", return_value="id-1") as send:
             message = messaging_services.send_message(
                 chat, "pie", image_url="https://cdn.example/x.png"
             )
@@ -362,7 +362,7 @@ class SendImageServiceTests(TestCase):
 
     def test_a_failed_image_send_keeps_the_row_as_failed(self):
         chat = conversation()
-        with mock.patch.object(FakeProvider, "send_image", side_effect=RuntimeError("boom")):
+        with mock.patch.object(StubProvider, "send_image", side_effect=RuntimeError("boom")):
             with self.assertRaises(messaging_services.SendFailed):
                 messaging_services.send_message(chat, "pie", image_url="https://x/y.png")
         self.assertEqual(Message.objects.get().status, "failed")
@@ -377,6 +377,8 @@ class SendImageServiceTests(TestCase):
             def send_template(self, to, template_name, params): return "t-2"
             def parse_webhook(self, request): return []
             def verify_signature(self, request): return True
+            def create_template(self, spec): return "tpl-1"
+            def template_verdicts(self): return []
 
         provider = TextOnly()
         self.assertEqual(provider.send_image("+57", "https://x/y.png", "hola"), "t-1")
@@ -416,8 +418,8 @@ class ImageUrlIsAbsoluteTests(TestCase):
 
     @override_settings(PUBLIC_BASE_URL="")
     def test_the_request_host_is_only_the_fallback_with_no_origin_configured(self):
-        # Local development against the fake provider: nothing ever fetches
-        # the link, and there is no production domain to point at.
+        # Local development: Meta could not reach the link anyway, and there
+        # is no production domain to point at.
         row = reply(title="Promo", body="hola", image=png())
         request = RequestFactory().get("/", HTTP_HOST="testserver")
         self.assertEqual(

@@ -69,7 +69,7 @@ class PricedOnSendTests(TestCase):
         chat, entry = conversation(), template()
 
         with patch(
-            "messaging.providers.fake.FakeProvider.send_template",
+            "messaging.testing.StubProvider.send_template",
             side_effect=RuntimeError("graph said no"),
         ):
             with self.assertRaises(services.SendFailed):
@@ -111,27 +111,7 @@ class MonthlyCeilingTests(TestCase):
 
 
 class SendableTemplatesTests(TestCase):
-    def test_rejected_and_inactive_plantillas_are_not_offered(self):
-        template(name="ok")
-        template(name="no", status="rechazada")
-        template(name="off", is_active=False)
-
-        offered = [t.name for t in services.sendable_templates()]
-
-        self.assertEqual(offered, ["ok"])
-
-    def test_approved_ones_come_first(self):
-        # Without a catalogue (fake) pendientes stay on offer, after aceptadas.
-        template(name="zz_aprobada", status="aceptada")
-        template(name="aa_pendiente", status="pendiente")
-
-        self.assertEqual(
-            [t.name for t in services.sendable_templates()],
-            ["zz_aprobada", "aa_pendiente"],
-        )
-
-    @override_settings(MESSAGING_PROVIDER="meta")
-    def test_with_a_catalogue_only_aceptadas_are_offered(self):
+    def test_only_active_aceptadas_are_offered(self):
         # Meta refuses any other name as nonexistent (132001).
         template(name="ok")
         template(name="prueba_texto", status="pendiente")
@@ -139,6 +119,14 @@ class SendableTemplatesTests(TestCase):
         template(name="off", is_active=False)
 
         self.assertEqual([t.name for t in services.sendable_templates()], ["ok"])
+
+    def test_they_come_in_name_order(self):
+        template(name="zz_ultima")
+        template(name="aa_primera")
+
+        self.assertEqual(
+            [t.name for t in services.sendable_templates()], ["aa_primera", "zz_ultima"]
+        )
 
 
 class ConversationForClientTests(TestCase):

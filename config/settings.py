@@ -26,7 +26,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # `manage.py test ...` (argv[1]) or a pytest run. Matching 'test' anywhere in
 # argv, as this used to, also fired on any command that merely took 'test' as
 # an argument -- and a process that believes it is testing quietly switches to
-# SQLite, the fake provider and no login gate.
+# SQLite, the stub messaging provider and no login gate.
 TESTING = (
     (len(sys.argv) > 1 and sys.argv[1] == 'test')
     or 'PYTEST_CURRENT_TEST' in os.environ
@@ -408,27 +408,23 @@ MAILERS = {
 
 
 # Messaging
-# Which provider backs sending and webhooks: 'fake' | 'meta'.
-# Swapping to a real provider is this one variable plus its credentials below
-# (see .env.example). Values come from the environment so no credential ever
-# lands in this file. `manage.py test` always forces 'fake' (see TESTING
-# above), even when a developer's own .env is set to a real provider -- tests
-# must not depend on a live Meta connection to pass. Outside
-# tests the variable is required -- see the check below.
+# Which provider backs sending and webhooks. Meta's Cloud API ('meta') is the
+# only one the app has; the variable stays required so a deployment names it
+# on purpose, and its credentials come from the environment further down (see
+# .env.example) so no credential ever lands in this file.
+#
+# `manage.py test` never talks to Meta: TESTING selects 'stub', a provider
+# that lives in test code (messaging/testing.py) and is registered only under
+# TESTING -- even when a developer's own .env holds real credentials.
 
-MESSAGING_PROVIDER = 'fake' if TESTING else os.environ.get('MESSAGING_PROVIDER', '')
+MESSAGING_PROVIDER = 'stub' if TESTING else os.environ.get('MESSAGING_PROVIDER', '')
 
-# No silent default. 'fake' used to be the fallback, which meant a deploy
-# missing the variable ran happily on simulated sends and simulated receipts
-# -- ticks moving in the UI, nothing reaching a phone. Production is real
-# customers writing in through the shared database; it must never run on the
-# simulator by accident. Local development sets MESSAGING_PROVIDER=fake
-# explicitly in .env (see .env.example).
+# No silent default. A deploy missing the variable once ran happily on the
+# fake simulator -- ticks moving in the UI, nothing reaching a phone -- so a
+# missing value refuses to start instead.
 if not MESSAGING_PROVIDER:
     raise ImproperlyConfigured(
-        "MESSAGING_PROVIDER is not set. Choose 'meta' for a real "
-        "WhatsApp line, or 'fake' for local development only "
-        "(see .env.example)."
+        "MESSAGING_PROVIDER is not set. Set it to 'meta' (see .env.example)."
     )
 
 # The names messaging.providers.registry knows, repeated here as a literal on
@@ -438,28 +434,17 @@ if not MESSAGING_PROVIDER:
 # An unknown value used to boot fine and fail later -- get_provider raised
 # only when something tried to send, so the deployment looked healthy while
 # every outbound message crashed and every webhook 404'd. It fails at startup
-# now, which is the difference between a deploy that refuses and a CRM that
-# quietly stops talking to customers.
-MESSAGING_PROVIDERS = ('fake', 'meta')
+# now. The likeliest way to land here is a .env still set to 'fake', the local
+# simulator this app no longer has.
+MESSAGING_PROVIDERS = ('meta',)
 
-if MESSAGING_PROVIDER not in MESSAGING_PROVIDERS:
+if not TESTING and MESSAGING_PROVIDER not in MESSAGING_PROVIDERS:
     raise ImproperlyConfigured(
         f"MESSAGING_PROVIDER={MESSAGING_PROVIDER!r} is not a provider this app "
-        f"has. Choose one of {', '.join(MESSAGING_PROVIDERS)}. A deployment "
-        f"carrying the name of a provider that has since been removed lands "
-        f"here: set the variable to one of those three."
+        f"has. Choose one of {', '.join(MESSAGING_PROVIDERS)}. A deployment or "
+        f".env carrying the name of a provider that has since been removed "
+        f"(such as 'fake') lands here."
     )
-
-# Shared webhook secrets. Neither has a real default: a value committed to
-# this file is a value an attacker already has, and both providers now reject
-# every request while their secret is empty (fail closed, like Meta's). Under
-# `manage.py test` they get a fixed value instead, so the signature-checking
-# path is still exercised end to end rather than skipped.
-#
-# Fake provider: the secret dev webhooks send in X-Fake-Signature.
-MESSAGING_FAKE_SECRET = (
-    'testing-fake-secret' if TESTING else os.environ.get('MESSAGING_FAKE_SECRET', '')
-)
 
 # Template pricing (messaging/pricing.py). Sending a plantilla is billed per
 # message by category and recipient market, so the CRM quotes the price before

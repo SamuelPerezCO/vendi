@@ -3,12 +3,10 @@
   rendered with its sample values. Used by the Nuevo chat modal, which wraps
   it in its own <form>.
 
-  What is on offer is messaging.services.sendable_templates. On Meta that is
-  aceptadas only -- Meta refuses any other name as nonexistent -- so the
-  Pendiente badge only ever shows on a provider without a catalogue (fake),
-  where nothing can be approved and pendientes are offered as they are. An
-  empty picker whose plantillas are all still in Meta's review says so and
-  points at Sincronizar con WhatsApp (template_review_note.html).
+  What is on offer is messaging.services.sendable_templates: aceptadas only,
+  since Meta refuses any other name as nonexistent. An empty picker whose
+  plantillas are all still in Meta's review says so and points at
+  Sincronizar con WhatsApp (template_review_note.html).
 
   Context: template_options -- [{template, body}], awaiting_review,
            selected_template, reload_url
@@ -37,12 +35,7 @@
                    {% if selected_template.pk == entry.template.pk %}checked{% endif %}
                  {% elif forloop.first %}checked{% endif %}>
           <span class="tpl-pick__body">
-            <span class="tpl-pick__name">
-              {{ entry.template.name }}
-              {% if entry.template.status == "pendiente" %}
-                <span class="quickreplies__badge">Pendiente</span>
-              {% endif %}
-            </span>
+            <span class="tpl-pick__name">{{ entry.template.name }}</span>
             <span class="tpl-pick__text">{{ entry.body }}</span>
           </span>
         </label>

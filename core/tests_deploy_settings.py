@@ -25,12 +25,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase
 
 SETTINGS_FILE = Path(settings.BASE_DIR) / "config" / "settings.py"
 
 #: The minimum a deployment must supply for the module to import at all --
-#: MESSAGING_PROVIDER is required (there is no silent 'fake' fallback).
+#: MESSAGING_PROVIDER is required (there is no silent default).
 MINIMUM_ENV = {"MESSAGING_PROVIDER": "meta", "SECRET_KEY": "x" * 50}
 
 
@@ -155,3 +156,25 @@ class LegacyAliasTests(SimpleTestCase):
         resolved = resolve(VERCEL="1")
 
         self.assertNotIn("mvp-crm-lake.vercel.app", resolved["VERCEL_PROTECTED_ALIASES"])
+
+
+class MessagingProviderTests(SimpleTestCase):
+    """Meta is the only provider the app has, and every environment must name
+    it: anything else refuses to start rather than boot into a CRM whose
+    every send and webhook fails."""
+
+    def test_meta_is_accepted(self):
+        self.assertEqual(resolve()["MESSAGING_PROVIDER"], "meta")
+
+    def test_a_leftover_fake_refuses_to_start(self):
+        # The simulator is gone; a .env or dashboard still naming it lands here.
+        with self.assertRaises(ImproperlyConfigured):
+            resolve(MESSAGING_PROVIDER="fake")
+
+    def test_the_test_stub_cannot_be_selected_outside_tests(self):
+        with self.assertRaises(ImproperlyConfigured):
+            resolve(MESSAGING_PROVIDER="stub")
+
+    def test_a_missing_variable_refuses_to_start(self):
+        with self.assertRaises(ImproperlyConfigured):
+            resolve(MESSAGING_PROVIDER="")

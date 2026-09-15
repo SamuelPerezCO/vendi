@@ -222,6 +222,6 @@ class MetaSpendCommandTests(TestCase):
             self.run_command([point()], month="agosto")
 
     def test_a_provider_without_analytics_says_so(self):
-        # The default fake provider has no billing analytics at all.
+        # The stub provider tests run on has no billing analytics at all.
         with self.assertRaises(CommandError):
             call_command("meta_spend", stdout=StringIO())

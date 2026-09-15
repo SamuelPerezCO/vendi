@@ -1,13 +1,12 @@
 """Provider-level tests for what actually goes out on the wire: the image
-payloads behind a quick reply with a picture, and the plain-text fallback a
-provider without a template mechanism has to make."""
+payloads behind a quick reply with a picture, and the caption fallback a
+provider without media support inherits from the base class."""
 
 from unittest import mock
 
 from django.test import TestCase, override_settings
 
 from messaging.providers.base import MessagingProvider
-from messaging.providers.fake import FakeProvider
 from messaging.providers.meta import MetaProvider
 
 
@@ -36,26 +35,6 @@ class MetaSendImageTests(TestCase):
             provider.send_image("+57", "https://cdn.example/p.png")
         self.assertEqual(post.call_args.args[0]["image"], {"link": "https://cdn.example/p.png"})
 
-    @override_settings(META_ACCESS_TOKEN="tok", META_PHONE_NUMBER_ID="123")
-    def test_the_rendered_body_never_leaks_into_the_template_parameters(self):
-        # Meta renders from its own approved copy; _rendered is for
-        # text-only providers and must not become a body parameter.
-        provider = MetaProvider()
-        with mock.patch.object(provider, "_post_message", return_value="wamid-3") as post:
-            provider.send_template(
-                "+57", "saludo", {"1": "Camila", "_language": "es", "_rendered": "Hola Camila"}
-            )
-        payload = post.call_args.args[0]
-        self.assertEqual(payload["template"]["language"], {"code": "es"})
-        parameters = payload["template"]["components"][0]["parameters"]
-        self.assertEqual(parameters, [{"type": "text", "text": "Camila"}])
-
-
-class FakeProviderImageTests(TestCase):
-    def test_send_image_returns_an_id_like_the_other_sends(self):
-        message_id = FakeProvider().send_image("+57", "https://cdn.example/p.png", "hola")
-        self.assertTrue(message_id.startswith("fake-"))
-
 
 class BaseFallbackTests(TestCase):
     def test_a_provider_without_send_image_delivers_the_caption(self):
@@ -68,6 +47,8 @@ class BaseFallbackTests(TestCase):
             def send_template(self, to, template_name, params): return "t-2"
             def parse_webhook(self, request): return []
             def verify_signature(self, request): return True
+            def create_template(self, spec): return "tpl-1"
+            def template_verdicts(self): return []
 
         provider = TextOnly()
         self.assertEqual(provider.send_image("+57", "https://x/y.png", "hola"), "t-1")

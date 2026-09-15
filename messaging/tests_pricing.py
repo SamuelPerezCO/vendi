@@ -49,6 +49,8 @@ def template(category="marketing", **extra):
         name=extra.pop("name", "saludo_inicial"),
         body=extra.pop("body", "Hola {{1}}"),
         body_sample_values=extra.pop("body_sample_values", ["Camila"]),
+        # Aceptada: only an approved plantilla can be sent at all.
+        status=extra.pop("status", "aceptada"),
         category=category,
         **extra,
     )

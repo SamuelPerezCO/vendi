@@ -14,11 +14,9 @@
   month's running total sits once at the bottom. Both come from
   messaging.pricing via core.views._template_send_body_context.
 
-  What is on offer is messaging.services.sendable_templates: on Meta,
-  aceptadas only. The "pendiente de aprobación" suffix and caveat below only
-  ever show on a provider without a catalogue (fake). An empty list whose
-  plantillas are all still in Meta's review says so instead of "no hay
-  plantillas" (template_review_note.html).
+  What is on offer is messaging.services.sendable_templates: aceptadas only.
+  An empty list whose plantillas are all still in Meta's review says so
+  instead of "no hay plantillas" (template_review_note.html).
 
   Context: entries -- [{template, variables: [{number, value}], quote}],
   selected_id, send_form_error, budget, awaiting_review
@@ -29,7 +27,7 @@
   <select class="tpl-send__select" id="tpl-send-pick" name="template" data-template-pick>
     {% for entry in entries %}
       <option value="{{ entry.template.pk }}"{% if entry.template.pk == selected_id %} selected{% endif %}>
-        {{ entry.template.name }}{% if entry.template.status == "pendiente" %} · pendiente de aprobación{% endif %}
+        {{ entry.template.name }}
       </option>
     {% endfor %}
   </select>
@@ -40,13 +38,6 @@
               data-template-body="{{ entry.template.body }}"
               {% if entry.template.pk != selected_id %}hidden disabled{% endif %}>
       <legend class="sr-only">Variables de {{ entry.template.name }}</legend>
-
-      {% if entry.template.status == "pendiente" %}
-        <p class="tpl-send__warn">
-          WhatsApp aún no aprobó esta plantilla. Fuera de la ventana de 24
-          horas el envío puede rechazarse.
-        </p>
-      {% endif %}
 
       {% for variable in entry.variables %}
         <label class="tpl-send__label" for="tpl-var-{{ entry.template.pk }}-{{ variable.number }}">
