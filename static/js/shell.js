@@ -158,9 +158,25 @@
    * bottom after those swaps -- but only when the user was already there:
    * someone scrolled up reading history must not be yanked back down by a
    * poll. "There" is measured just before the swap, with a small tolerance.
+   *
+   * Photos move "the bottom". A photo has no height until it loads, so the
+   * scroll right after a swap lands short of any photo still loading -- one
+   * that just arrived, or a quick reply sent with a picture. The photo then
+   * grows and pushes the newest messages below the fold, and the next poll
+   * finds a reader who is no longer at the bottom and leaves them there for
+   * good. So the thread stays pinned: each photo that finishes loading
+   * scrolls it back down, unless the reader has scrolled since.
    * ---------------------------------------------------------------------- */
 
   var chatWasAtBottom = true;
+
+  /* Whether the thread is pinned to the newest message: set whenever a swap
+     scrolls it to the bottom, cleared as soon as the reader scrolls it up.
+     Only the reader's own input clears it. The browser moves scrollTop on its
+     own as well -- scroll anchoring keeps the view steady when a photo above
+     the fold grows -- and reading that as the reader leaving drops the pin
+     exactly when several photos finish loading at once. */
+  var chatPinned = false;
 
   /* How far from the bottom still counts as "at the bottom". This only has to
      absorb sub-pixel rounding -- scrollTop comes back fractional (3821.5 for a
@@ -181,6 +197,11 @@
     return box.scrollHeight - box.scrollTop - box.clientHeight < CHAT_BOTTOM_SLACK;
   }
 
+  function pinToBottom(box) {
+    box.scrollTop = box.scrollHeight;
+    chatPinned = true;
+  }
+
   document.addEventListener("htmx:beforeSwap", function (event) {
     if (!isChatBox(event.detail.target)) return;
     // The composer posts to this same target, so a send lands here too.
@@ -199,14 +220,49 @@
     if (!box) return;
     // A freshly-opened thread always starts at the newest message.
     if (!isChatBox(event.detail.target) || chatWasAtBottom) {
-      box.scrollTop = box.scrollHeight;
+      pinToBottom(box);
       chatWasAtBottom = true;
+    } else {
+      chatPinned = false;
     }
   });
 
+  function inChat(node) {
+    return node && node.closest ? node.closest("#chat-messages") : null;
+  }
+
+  // The reader scrolling the thread up: the wheel, a touch drag, the
+  // scrollbar (a press on the box itself rather than on a message), or a
+  // scroll key while no text field has focus. Scrolling down, or clicking a
+  // message or a photo, leaves the pin alone.
+  document.addEventListener("wheel", function (event) {
+    if (event.deltaY < 0 && inChat(event.target)) chatPinned = false;
+  }, { capture: true, passive: true });
+  document.addEventListener("touchmove", function (event) {
+    if (inChat(event.target)) chatPinned = false;
+  }, { capture: true, passive: true });
+  document.addEventListener("pointerdown", function (event) {
+    if (isChatBox(event.target)) chatPinned = false;
+  }, true);
+  document.addEventListener("keydown", function (event) {
+    var target = event.target;
+    var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable;
+    if (!typing && ["PageUp", "ArrowUp", "Home"].indexOf(event.key) !== -1) chatPinned = false;
+  }, true);
+
+  // load and error do not bubble, hence the capture phase. A photo that fails
+  // still changes its bubble's height: the alt text takes its place.
+  function repinAfterPhoto(event) {
+    if (!chatPinned || !event.target || event.target.tagName !== "IMG") return;
+    var box = inChat(event.target); // null: swapped out before it loaded
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+  document.addEventListener("load", repinAfterPhoto, true);
+  document.addEventListener("error", repinAfterPhoto, true);
+
   // Full-page load with ?chat= in the URL renders the thread server-side.
   var initialChat = document.getElementById("chat-messages");
-  if (initialChat) initialChat.scrollTop = initialChat.scrollHeight;
+  if (initialChat) pinToBottom(initialChat);
 
   /* -------------------------------------------------------------------------
    * Dialogs (the Etiquetas create/edit modals, the template chooser).
