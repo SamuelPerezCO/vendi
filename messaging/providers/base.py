@@ -49,13 +49,19 @@ class MessagingProvider(ABC):
         """Send a pre-approved template message. The only way to reach someone
         outside the 24-hour window. Returns the provider's message id.
 
-        ``params`` fills the template's placeholders. Two reserved keys ride
-        in it for providers that have no template mechanism of their own and
-        must fall back to plain text: ``_language`` (the language code) and
-        ``_rendered`` (the body with its sample values already substituted --
-        what the CRM shows in the thread). A provider with real template
-        support ignores ``_rendered``; one without it sends exactly that
-        string, so the customer reads the message rather than its name.
+        ``params`` fills the template's placeholders. Three reserved keys
+        ride in it. ``_language`` (the language code) and ``_rendered`` (the
+        body with its sample values already substituted -- what the CRM shows
+        in the thread) exist for providers with no template mechanism of
+        their own, which must fall back to plain text: a provider with real
+        template support ignores ``_rendered``, one without it sends exactly
+        that string, so the customer reads the message rather than its name.
+        ``_category`` is the plantilla's category, which only matters for
+        ``authentication`` -- those are sent with an extra button component.
+
+        Every reserved key starts with an underscore, so a provider that
+        knows none of them can drop them all by that one rule and be left
+        with the placeholder values.
         """
 
     def send_image(self, to: str, image_url: str, caption: str = "") -> str:

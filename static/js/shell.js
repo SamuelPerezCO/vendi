@@ -338,6 +338,13 @@
    * ---------------------------------------------------------------------- */
 
   var TEMPLATE_NAME_RE = /^[a-z0-9_]+$/;
+  // Where a variable may not sit -- mirrors core.plantillas'
+  // LEADING/TRAILING/ADJACENT_VARIABLE regexes. WhatsApp refuses all three
+  // at submission, so the editor says so while the body is being typed
+  // rather than after the plantilla has been saved and bounced.
+  var TEMPLATE_LEADING_VARIABLE_RE = /^\{\{[1-9]\d*\}\}/;
+  var TEMPLATE_TRAILING_VARIABLE_RE = /\{\{[1-9]\d*\}\}$/;
+  var TEMPLATE_ADJACENT_VARIABLES_RE = /\}\}\s*\{\{/;
   // Canonical variables only ({{1}}, {{2}}... no leading zeros) -- mirrors
   // core.plantillas.VARIABLE_RE so client and server agree on what counts.
   var TEMPLATE_VARIABLE_RE = /\{\{([1-9]\d*)\}\}/g;
@@ -380,6 +387,34 @@
     input.setAttribute("aria-invalid", invalid ? "true" : "false");
   }
 
+  // Autenticación swaps the copy fields for its own three settings: WhatsApp
+  // writes an OTP message itself, so there is nothing to author. Mirrors the
+  // same split in core.plantillas.validate/model_kwargs.
+  function syncTemplateAuth(form) {
+    var isAuth = checkedValue(form, "category") === "authentication";
+    var copyFields = form.querySelector("[data-copy-fields]");
+    var authPanel = form.querySelector("[data-auth-panel]");
+    if (copyFields) copyFields.hidden = isAuth;
+    if (authPanel) authPanel.hidden = !isAuth;
+  }
+
+  // WhatsApp's own wording for an authentication message -- body, security
+  // line and expiry footer -- by language code, so the preview shows what
+  // will actually be sent instead of an empty bubble. Rendered by the editor
+  // (json_script) rather than repeated here: core.plantillas.AUTH_PREVIEW
+  // stays the single source, and the same fallback applies (es_MX -> es).
+  function authPreviewFor(language) {
+    var script = document.getElementById("tpl-auth-preview");
+    if (!script) return null;
+    var copy;
+    try {
+      copy = JSON.parse(script.textContent);
+    } catch (error) {
+      return null;
+    }
+    return copy[language] || copy[language.split("_")[0]] || copy.es || null;
+  }
+
   // The sub-type options depend on the category: show the matching group,
   // disable the rest (disabled radios don't submit) and make sure the
   // visible group has a selection.
@@ -394,6 +429,29 @@
         if (radios[0]) radios[0].checked = true;
       }
     });
+  }
+
+  // Flag a body that opens with a variable, closes with one, or runs two
+  // together -- the three placements WhatsApp refuses. A warning, not a
+  // block: the field keeps what was typed and core.plantillas has the last
+  // word on submit.
+  function syncTemplateBody(form) {
+    var input = form.querySelector("[data-body-input]");
+    var warning = form.querySelector("[data-body-warning]");
+    if (!input || !warning) return;
+    var text = input.value.trim();
+    var message = "";
+    if (TEMPLATE_LEADING_VARIABLE_RE.test(text)) {
+      message = "El cuerpo no puede empezar con una variable; escribe texto antes.";
+    } else if (TEMPLATE_TRAILING_VARIABLE_RE.test(text)) {
+      message = "El cuerpo no puede terminar con una variable; escribe texto después.";
+    } else if (TEMPLATE_ADJACENT_VARIABLES_RE.test(text)) {
+      message = "Dos variables no pueden ir seguidas; escribe texto entre ellas.";
+    }
+    warning.textContent = message;
+    warning.hidden = !message;
+    var field = input.closest(".ffield");
+    if (field) field.classList.toggle("ffield--error", !!message);
   }
 
   function syncTemplateHeader(form) {
@@ -479,6 +537,11 @@
     var preview = document.querySelector("[data-wa-preview]");
     if (!preview) return;
 
+    if (checkedValue(form, "category") === "authentication") {
+      syncTemplateAuthPreview(form, preview);
+      return;
+    }
+
     var headerKind = checkedValue(form, "header_type");
     var headerText = headerKind === "text" ? form.elements.header_text.value : "";
     var mediaLabel = MEDIA_HEADER_LABELS[headerKind] || "";
@@ -538,14 +601,53 @@
     });
   }
 
+  // The Autenticación bubble: WhatsApp's sentence with a sample code, its
+  // security line when asked for, the expiry as the footer and the
+  // copy-code button. None of it is ours to word -- which is the point of
+  // showing it, so the person sees what the customer will read.
+  function syncTemplateAuthPreview(form, preview) {
+    var copy = authPreviewFor(form.elements.language.value);
+    if (!copy) return;
+    var body = copy.body.replace(TEMPLATE_VARIABLE_RE, "123456");
+    if (form.elements.auth_security_recommendation.checked) {
+      body += "\n" + copy.security;
+    }
+    var minutes = form.elements.auth_expiration.value.trim();
+    var footer = minutes ? copy.expiration.replace("{minutes}", minutes) : "";
+    var buttonText =
+      form.elements.auth_button_text.value.trim() ||
+      form.elements.auth_button_text.placeholder.trim() ||
+      "Copiar código";
+
+    preview.querySelector("[data-wa-bubble]").hidden = false;
+    preview.querySelector("[data-wa-empty]").hidden = true;
+    preview.querySelector("[data-wa-header]").hidden = true;
+    preview.querySelector("[data-wa-media]").hidden = true;
+    preview.querySelector("[data-wa-body]").textContent = body;
+
+    var footerEl = preview.querySelector("[data-wa-footer]");
+    footerEl.hidden = !footer;
+    footerEl.textContent = footer;
+
+    var buttonsEl = preview.querySelector("[data-wa-buttons]");
+    buttonsEl.hidden = false;
+    buttonsEl.textContent = "";
+    var button = document.createElement("span");
+    button.className = "wa-bubble__button";
+    button.textContent = buttonText;
+    buttonsEl.appendChild(button);
+  }
+
   // Full sync -- on first load and after any swap that (re)renders the
   // editor. A no-op on every other screen.
   function syncTemplateEditor() {
     var form = document.querySelector("[data-plantilla-form]");
     if (!form) return;
     syncTemplateCategory(form);
+    syncTemplateAuth(form);
     syncTemplateHeader(form);
     syncTemplateButtons(form);
+    syncTemplateBody(form);
     syncTemplateSamples(form);
     syncTemplateCounters(form);
     syncTemplatePreview(form);
@@ -555,7 +657,10 @@
     var form = event.target.closest && event.target.closest("[data-plantilla-form]");
     if (!form) return;
     if (event.target.matches("[data-name-input]")) syncTemplateName(event.target);
-    if (event.target.matches("[data-body-input]")) syncTemplateSamples(form);
+    if (event.target.matches("[data-body-input]")) {
+      syncTemplateBody(form);
+      syncTemplateSamples(form);
+    }
     syncTemplateCounters(form);
     syncTemplatePreview(form);
   });
@@ -563,7 +668,10 @@
   document.addEventListener("change", function (event) {
     var form = event.target.closest && event.target.closest("[data-plantilla-form]");
     if (!form) return;
-    if (event.target.name === "category") syncTemplateCategory(form);
+    if (event.target.name === "category") {
+      syncTemplateCategory(form);
+      syncTemplateAuth(form);
+    }
     if (event.target.name === "header_type") syncTemplateHeader(form);
     if (event.target.name === "button_kind") syncTemplateButtons(form);
     syncTemplatePreview(form);
@@ -584,6 +692,7 @@
     body.value = body.value.slice(0, start) + token + body.value.slice(end);
     body.focus();
     body.setSelectionRange(start + token.length, start + token.length);
+    syncTemplateBody(form);
     syncTemplateSamples(form);
     syncTemplateCounters(form);
     syncTemplatePreview(form);

@@ -15,9 +15,17 @@
   sample inputs and the preview -- is delegated in static/js/shell.js off
   the data-* hooks; core.plantillas re-validates everything server-side.
 
+  Autenticación is the one category that does not use the copy fields at
+  all: WhatsApp writes and localizes an OTP message itself and refuses one
+  that arrives with its own body, so picking that card swaps Cabecera /
+  Cuerpo / Pie / Botones for the three settings it does accept
+  ([data-auth-panel]). Both blocks stay in the DOM and toggle on `hidden`;
+  core.plantillas ignores whichever one the category did not ask for.
+
   Context: categories, sub_types, languages, header_types, button_kinds,
            teams, form, errors, body_max, header_text_max, footer_max,
-           button_text_max
+           button_text_max, auth_expiration_min, auth_expiration_max,
+           auth_button_text_default, auth_bodies
 {% endcomment %}
 
 <div class="tpl-editor">
@@ -92,6 +100,9 @@
             </div>
           {% endfor %}
         </div>
+        {% if errors.sub_type %}
+          <p class="tpl-editor__error" role="alert">{{ errors.sub_type }}</p>
+        {% endif %}
       </fieldset>
 
       {# --- Información básica ------------------------------------------- #}
@@ -128,6 +139,13 @@
       {% if errors.team %}
         <p class="tpl-editor__error" id="tpl-team-error" role="alert">{{ errors.team }}</p>
       {% endif %}
+
+      {% comment %}
+        Everything from here to the Autenticación panel is the copy of an
+        ordinary template. Hidden as one block for Autenticación, whose
+        wording is not ours to write.
+      {% endcomment %}
+      <div data-copy-fields{% if form.category == "authentication" %} hidden{% endif %}>
 
       {# --- Cabecera ------------------------------------------------------ #}
       <fieldset class="tpl-editor__group">
@@ -186,6 +204,12 @@
       <div class="tpl-editor__body-tools">
         <button type="button" class="btn-ghost" data-add-variable>+ Añadir variable</button>
       </div>
+      {% comment %}
+        Filled by shell.js while the body is typed, for the placements
+        WhatsApp refuses (a variable first, last, or two in a row). Server
+        errors above still win on submit -- this only gets there sooner.
+      {% endcomment %}
+      <p class="tpl-editor__error" data-body-warning role="status" hidden></p>
       {% if errors.body %}
         <p class="tpl-editor__error" id="tpl-body-error" role="alert">{{ errors.body }}</p>
       {% endif %}
@@ -288,6 +312,62 @@
           <p class="tpl-editor__error" role="alert">{{ errors.buttons }}</p>
         {% endif %}
       </fieldset>
+
+      </div>{# /data-copy-fields #}
+
+      {% comment %}
+        --- Autenticación ------------------------------------------------
+        The whole form for this category. There is no body field on purpose:
+        WhatsApp composes the message ("Tu código de verificación es
+        {{1}}"), translates it per language and refuses a template that
+        brings its own -- so the preview shows WhatsApp's wording and these
+        three settings are all there is to decide. auth_preview feeds that
+        preview; shell.js reads it to keep the bubble in step with Idioma.
+      {% endcomment %}
+      <div data-auth-panel{% if form.category != "authentication" %} hidden{% endif %}>
+        {{ auth_preview|json_script:"tpl-auth-preview" }}
+        <h2 class="tpl-editor__heading">Código de autenticación</h2>
+        <p class="tpl-editor__hint">WhatsApp escribe y traduce el texto de este
+          mensaje; aquí solo eliges cuánto dura el código y cómo se copia.</p>
+
+        <label class="tpl-editor__check">
+          <input type="checkbox" name="auth_security_recommendation"
+                 id="tpl-auth-security" value="1"
+                 {% if form.auth_security_recommendation %}checked{% endif %}
+                >
+          <span>Añadir la recomendación de seguridad («no compartas este código»)</span>
+        </label>
+
+        <div class="tpl-editor__pair">
+          <div class="ffield{% if errors.auth_expiration %} ffield--error{% endif %}">
+            <input class="ffield__input" type="number" name="auth_expiration"
+                   id="tpl-auth-expiration" value="{{ form.auth_expiration }}"
+                   min="{{ auth_expiration_min }}" max="{{ auth_expiration_max }}"
+                   inputmode="numeric" placeholder=" "
+                   aria-describedby="tpl-auth-expiration-hint{% if errors.auth_expiration %} tpl-auth-expiration-error{% endif %}"
+                   {% if errors.auth_expiration %}aria-invalid="true"{% endif %}>
+            <label class="ffield__label" for="tpl-auth-expiration">El código vence en (minutos)</label>
+          </div>
+
+          <div class="ffield{% if errors.auth_button_text %} ffield--error{% endif %}">
+            <input class="ffield__input" type="text" name="auth_button_text"
+                   id="tpl-auth-button" value="{{ form.auth_button_text }}"
+                   maxlength="{{ button_text_max }}"
+                   placeholder=" "
+                   {% if errors.auth_button_text %}aria-invalid="true" aria-describedby="tpl-auth-button-error"{% endif %}>
+            <label class="ffield__label" for="tpl-auth-button">Texto del botón de copiado</label>
+          </div>
+        </div>
+        <p class="tpl-editor__hint" id="tpl-auth-expiration-hint">Entre
+          {{ auth_expiration_min }} y {{ auth_expiration_max }} minutos. El botón
+          dice «{{ auth_button_text_default }}» si lo dejas vacío.</p>
+        {% if errors.auth_expiration %}
+          <p class="tpl-editor__error" id="tpl-auth-expiration-error" role="alert">{{ errors.auth_expiration }}</p>
+        {% endif %}
+        {% if errors.auth_button_text %}
+          <p class="tpl-editor__error" id="tpl-auth-button-error" role="alert">{{ errors.auth_button_text }}</p>
+        {% endif %}
+      </div>
 
       {# --- Acciones ------------------------------------------------------- #}
       <div class="tpl-editor__actions">

@@ -27,6 +27,19 @@ MEDIA_PLACEHOLDERS = {
 }
 
 
+#: Label of an authentication template's copy-code button when the editor
+#: leaves it blank. Shared by ``core.plantillas`` (the field's placeholder and
+#: default) and the Meta provider (what it actually submits), so the button a
+#: person sees previewed is the button that goes for approval.
+AUTH_BUTTON_TEXT_DEFAULT = "Copiar código"
+
+#: How long an authentication code may be said to last, in minutes -- the
+#: range the platform accepts.
+AUTH_EXPIRATION_MIN = 1
+AUTH_EXPIRATION_MAX = 90
+AUTH_EXPIRATION_DEFAULT = 10
+
+
 class SendOutcomeUnknown(Exception):
     """A send whose result the provider never reported.
 
@@ -130,6 +143,23 @@ class TemplateSpec:
     buttons: list[dict] = field(default_factory=list)
     """``MessageTemplate.buttons`` verbatim: ``{"type": "quick_reply"|"url"|
     "phone", "text": ..., ...}`` dicts."""
+
+    # --- authentication only ------------------------------------------------
+    #
+    # An authentication template carries none of the copy above: the platform
+    # writes and localizes the wording itself and accepts only these three
+    # settings. They are ignored for every other category, and every field
+    # above is ignored for this one.
+
+    auth_security_recommendation: bool = True
+    """Append the platform's own "no compartas este código" line."""
+
+    auth_code_expiration_minutes: int | None = None
+    """Show a "el código vence en N minutos" footer. None omits the footer."""
+
+    auth_button_text: str = ""
+    """Label of the copy-code button. Empty falls back to
+    :data:`AUTH_BUTTON_TEXT_DEFAULT`."""
 
 
 @dataclass(frozen=True)

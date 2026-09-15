@@ -3,6 +3,7 @@ Plantillas de WhatsApp tabbed table, the two-half empty state, and the
 template chooser modal both create buttons open."""
 
 import tempfile
+from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -191,6 +192,93 @@ class PlantillasTabTests(TestCase):
         self.assertContains(response, "tpl-empty")
 
 
+class PlantillaEditorAuthenticationTests(TestCase):
+    """The Autenticación category, which is a different form: WhatsApp writes
+    and localizes an OTP message itself and refuses one that arrives with its
+    own body, so the editor collects three settings and no copy at all."""
+
+    def payload(self, **overrides):
+        payload = {
+            "name": "codigo_verificacion",
+            "category": "authentication",
+            "sub_type": "auth_code",
+            "language": "es",
+            "team": "",
+            "auth_security_recommendation": "1",
+            "auth_expiration": "10",
+            "auth_button_text": "Copiar código",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_the_editor_renders_the_panel_and_its_copy(self):
+        html = self.client.get(reverse("plantilla_editor")).content.decode()
+        self.assertIn("data-auth-panel", html)
+        self.assertIn("Código de autenticación", html)
+        self.assertIn("El código vence en (minutos)", html)
+        self.assertIn("Texto del botón de copiado", html)
+        # The preview needs WhatsApp's own wording to show the real message.
+        self.assertIn('id="tpl-auth-preview"', html)
+
+    def test_a_valid_post_saves_the_three_settings(self):
+        self.client.post(reverse("plantilla_editor"), self.payload())
+        saved = MessageTemplate.objects.get()
+        self.assertEqual(saved.category, "authentication")
+        self.assertEqual(saved.sub_type, "auth_code")
+        self.assertTrue(saved.auth_security_recommendation)
+        self.assertEqual(saved.auth_code_expiration_minutes, 10)
+        self.assertEqual(saved.auth_button_text, "Copiar código")
+        self.assertEqual(saved.status, "pendiente")
+
+    def test_the_body_is_whatsapps_wording_not_anything_typed(self):
+        """Stored so the Inbox has something true to show, never submitted --
+        and never what the person typed into a field the panel hides."""
+        self.client.post(
+            reverse("plantilla_editor"),
+            self.payload(body="Un cuerpo que nadie pudo escribir", language="en"),
+        )
+        saved = MessageTemplate.objects.get()
+        self.assertEqual(saved.body, "Your verification code is {{1}}.")
+        self.assertEqual(saved.body_sample_values, ["123456"])
+
+    def test_the_copy_fields_are_not_required_and_not_kept(self):
+        """The old validator asked an Autenticación plantilla for a body and
+        refused it for not having one -- a field the panel never showed."""
+        self.client.post(reverse("plantilla_editor"), self.payload())
+        saved = MessageTemplate.objects.get()
+        self.assertEqual(saved.header_type, "none")
+        self.assertEqual(saved.footer, "")
+        self.assertEqual(saved.buttons, [])
+
+    def test_an_unchecked_security_recommendation_is_saved_as_off(self):
+        payload = self.payload()
+        del payload["auth_security_recommendation"]
+        self.client.post(reverse("plantilla_editor"), payload)
+        self.assertFalse(MessageTemplate.objects.get().auth_security_recommendation)
+
+    def test_a_blank_button_label_falls_back_to_the_default(self):
+        self.client.post(
+            reverse("plantilla_editor"), self.payload(auth_button_text="")
+        )
+        self.assertEqual(MessageTemplate.objects.get().auth_button_text, "Copiar código")
+
+    def test_the_expiry_must_be_a_number_in_range(self):
+        for value in ("", "diez", "0", "91"):
+            with self.subTest(value):
+                response = self.client.post(
+                    reverse("plantilla_editor"), self.payload(auth_expiration=value)
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(MessageTemplate.objects.count(), 0)
+
+    def test_the_button_label_is_capped(self):
+        response = self.client.post(
+            reverse("plantilla_editor"), self.payload(auth_button_text="x" * 26)
+        )
+        self.assertContains(response, "Máximo 25 caracteres")
+        self.assertEqual(MessageTemplate.objects.count(), 0)
+
+
 class PlantillasTableEndpointTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -362,6 +450,43 @@ class PlantillaEditorTests(TestCase):
         self.assertEqual(response.url, "/s/mensajeria/?view=plantillas-whatsapp")
         self.assertEqual(MessageTemplate.objects.count(), 1)
 
+    def test_a_refused_submission_survives_the_plain_redirect(self):
+        """A plain POST answers with a redirect, which has nowhere to put the
+        notice -- so it used to be computed and dropped, and the one case that
+        most needs explaining arrived as a silent Pendiente row."""
+        from messaging import services
+
+        with patch.object(
+            services,
+            "submit_template",
+            side_effect=services.TemplateSubmissionFailed(
+                "WhatsApp no aceptó la plantilla: HTTP 400 -- Nombre duplicado"
+            ),
+        ):
+            response = self.client.post(
+                reverse("plantilla_editor"), self.valid_payload()
+            )
+        self.assertEqual(response.status_code, 302)
+
+        panel = self.client.get(response.url).content.decode()
+        self.assertIn("Nombre duplicado", panel)
+        # Read once: it belongs on the page after the save, not on every
+        # visit after that.
+        self.assertNotIn("Nombre duplicado", self.client.get(response.url).content.decode())
+
+    def test_the_htmx_path_still_shows_it_inline(self):
+        from messaging import services
+
+        with patch.object(
+            services,
+            "submit_template",
+            side_effect=services.TemplateSubmissionFailed("HTTP 400 -- Nombre duplicado"),
+        ):
+            response = self.client.post(
+                reverse("plantilla_editor"), self.valid_payload(), headers=HTMX
+            )
+        self.assertContains(response, "Nombre duplicado")
+
     def test_plain_get_renders_inside_the_page_shell(self):
         html = self.client.get(reverse("plantilla_editor")).content.decode()
         self.assertIn("<html", html)
@@ -417,7 +542,74 @@ class PlantillaEditorTests(TestCase):
                 button_kind="cta", cta_phone_text="Llámanos", cta_phone="abc"
             ),
         )
-        self.assertContains(response, "teléfono válido")
+        self.assertContains(response, "código de país")
+        self.assertEqual(MessageTemplate.objects.count(), 0)
+
+    def test_a_call_button_needs_the_country_code(self):
+        """A bare local number used to pass here and be refused by WhatsApp
+        at submission, where nobody could see why."""
+        response = self.client.post(
+            reverse("plantilla_editor"),
+            self.valid_payload(
+                button_kind="cta", cta_phone_text="Llámanos", cta_phone="300 123 4567"
+            ),
+        )
+        self.assertContains(response, "código de país")
+        self.assertEqual(MessageTemplate.objects.count(), 0)
+
+        self.client.post(
+            reverse("plantilla_editor"),
+            self.valid_payload(
+                button_kind="cta",
+                cta_phone_text="Llámanos",
+                cta_phone="+57 300 123 4567",
+            ),
+        )
+        saved = MessageTemplate.objects.get()
+        self.assertEqual(
+            saved.buttons,
+            [{"type": "phone", "text": "Llámanos", "phone": "+57 300 123 4567"}],
+        )
+
+    def test_a_variable_may_not_open_close_or_double_up_the_body(self):
+        """The three placements WhatsApp refuses at submission. Caught here so
+        the editor explains them instead of the plantilla being saved and
+        bounced minutes later with nothing on screen to say why."""
+        cases = {
+            "{{1}}, tu pedido está listo.": "no puede empezar",
+            "Hola, tu pedido es {{1}}": "no puede terminar",
+            "Hola {{1}} {{2}}, pasa por él.": "no pueden ir seguidas",
+        }
+        for body, expected in cases.items():
+            with self.subTest(body):
+                response = self.client.post(
+                    reverse("plantilla_editor"),
+                    self.valid_payload(body=body, sample_1="Ana", sample_2="#4512"),
+                )
+                self.assertContains(response, expected)
+        self.assertEqual(MessageTemplate.objects.count(), 0)
+
+    def test_a_body_with_variables_in_the_middle_is_fine(self):
+        """The guard above must not refuse the ordinary case it exists to
+        protect -- variables with words on both sides and between them."""
+        self.client.post(
+            reverse("plantilla_editor"),
+            self.valid_payload(body="Hola {{1}}, tu pedido {{2}} está listo."),
+        )
+        self.assertEqual(MessageTemplate.objects.count(), 1)
+
+    def test_sub_types_without_an_editor_are_refused_not_downgraded(self):
+        """Carrusel and Oferta de tiempo limitado have nowhere to enter their
+        cards or their offer. Submitted anyway they reach WhatsApp as plain
+        custom templates and come back approved as something else, so the
+        editor says no until the authoring UI exists."""
+        for sub_type in ("carousel", "limited_time_offer"):
+            with self.subTest(sub_type):
+                response = self.client.post(
+                    reverse("plantilla_editor"),
+                    self.valid_payload(sub_type=sub_type),
+                )
+                self.assertContains(response, "aún no se puede crear")
         self.assertEqual(MessageTemplate.objects.count(), 0)
 
     def test_media_header_rejects_a_mismatched_file_type(self):

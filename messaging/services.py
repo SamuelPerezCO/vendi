@@ -241,6 +241,9 @@ def send_template(conversation: Conversation, template, values: dict, user=None)
     provider = get_provider()
     params = {str(key): str(value) for key, value in values.items()}
     params["_language"] = template.language
+    # Authentication templates need the code on their copy-code button as
+    # well as in the body; only the provider knows that shape.
+    params["_category"] = template.category
     # For providers with no template catalogue, so they send the
     # message rather than the template's name -- see MessagingProvider.
     params["_rendered"] = body

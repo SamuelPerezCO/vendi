@@ -49,6 +49,37 @@ class MetaSendImageTests(TestCase):
         self.assertEqual(payload["template"]["language"], {"code": "es"})
         parameters = payload["template"]["components"][0]["parameters"]
         self.assertEqual(parameters, [{"type": "text", "text": "Camila"}])
+        # No _category, so no extra components either.
+        self.assertEqual(len(payload["template"]["components"]), 1)
+
+    def test_an_authentication_send_puts_the_code_on_the_button_too(self):
+        """Meta refuses an authentication send that fills the body and leaves
+        the copy-code button empty. Same code, said twice."""
+        provider = MetaProvider()
+        with mock.patch.object(provider, "_post_message", return_value="wamid-4") as post:
+            provider.send_template(
+                "+57",
+                "codigo_verificacion",
+                {"1": "123456", "_language": "es", "_category": "authentication"},
+            )
+        components = post.call_args.args[0]["template"]["components"]
+        self.assertEqual(
+            components[1],
+            {
+                "type": "button",
+                "sub_type": "url",
+                "index": "0",
+                "parameters": [{"type": "text", "text": "123456"}],
+            },
+        )
+
+    def test_a_marketing_send_gets_no_button_component(self):
+        provider = MetaProvider()
+        with mock.patch.object(provider, "_post_message", return_value="wamid-5") as post:
+            provider.send_template(
+                "+57", "saludo", {"1": "Camila", "_category": "marketing"}
+            )
+        self.assertEqual(len(post.call_args.args[0]["template"]["components"]), 1)
 
 
 class FakeProviderImageTests(TestCase):

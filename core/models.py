@@ -239,6 +239,26 @@ class MessageTemplate(models.Model):
     #: List of {"type": "quick_reply"|"url"|"phone", "text": ..., ...} dicts.
     buttons = models.JSONField("botones", default=list, blank=True)
 
+    # --- Autenticación only -------------------------------------------------
+    #
+    # An authentication plantilla stores none of the copy above, because
+    # WhatsApp does not accept any: it writes and localizes the wording of an
+    # OTP message itself and takes only these three settings. ``body`` still
+    # holds WhatsApp's own sentence for this language (see
+    # core.plantillas.AUTH_BODIES) so the Inbox's send dialog and the
+    # conversation thread have something true to show -- it is never
+    # submitted for approval.
+
+    auth_security_recommendation = models.BooleanField(
+        "añadir recomendación de seguridad", default=True
+    )
+    auth_code_expiration_minutes = models.PositiveSmallIntegerField(
+        "el código vence en (minutos)", null=True, blank=True
+    )
+    auth_button_text = models.CharField(
+        "texto del botón de copiado", max_length=25, blank=True
+    )
+
     is_active = models.BooleanField("activo", default=True)
     status = models.CharField(
         "estado", max_length=10, choices=STATUS_CHOICES, default="pendiente"

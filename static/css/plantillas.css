@@ -90,6 +90,18 @@
 .tpl-editor__group legend { padding: 0; margin-block-end: 12px; }
 .tpl-editor__group .tpl-editor__heading { margin-block-start: 0; }
 
+/* The Autenticación panel's one checkbox -- same row shape the Respuestas
+   rápidas form uses for its "activo" toggle. */
+.tpl-editor__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block: 14px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
 .tpl-editor__pair {
   display: flex;
   gap: 14px;

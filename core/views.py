@@ -628,7 +628,25 @@ def _plantillas_context(request) -> dict:
         "active_tab": tab_key,
         "columns": mensajeria.TABLE_COLUMNS,
         "templates": mensajeria.get_templates(tab_key),
+        # A notice the editor stashed before redirecting here -- the plain
+        # (non-HTMX) save path, which has no response to render it into. The
+        # HTMX path passes its own and overwrites this.
+        "plantillas_notice": _take_plantillas_notice(request),
     }
+
+
+#: Session key the editor's plain POST leaves a notice under for the redirect
+#: that follows. A session rather than the messages framework because this
+#: panel renders standalone through HTMX too, where a message consumed by the
+#: page shell would be lost before this template ever ran.
+PLANTILLAS_NOTICE_KEY = "plantillas_notice"
+
+
+def _take_plantillas_notice(request) -> str:
+    """Pop the pending Plantillas notice, or "" if there is none. Read once:
+    a warning about a failed submission belongs on the page that follows the
+    save, not on every visit after it."""
+    return request.session.pop(PLANTILLAS_NOTICE_KEY, "")
 
 
 def _respuestas_context(request) -> dict:
@@ -2459,6 +2477,10 @@ def _plantilla_editor_context(state=None, errors=None) -> dict:
         "header_text_max": plantillas.HEADER_TEXT_MAX,
         "footer_max": plantillas.FOOTER_MAX,
         "button_text_max": plantillas.BUTTON_TEXT_MAX,
+        "auth_preview": plantillas.AUTH_PREVIEW,
+        "auth_expiration_min": plantillas.AUTH_EXPIRATION_MIN,
+        "auth_expiration_max": plantillas.AUTH_EXPIRATION_MAX,
+        "auth_button_text_default": plantillas.AUTH_BUTTON_TEXT_DEFAULT,
     }
 
 
@@ -2509,6 +2531,13 @@ def plantilla_editor(request):
                             request=request,
                         )
                     )
+                # A plain POST answers with a redirect, which has nowhere to
+                # put the notice -- so it rides in the session and the panel
+                # picks it up (_take_plantillas_notice). Without this the one
+                # case that most needs explaining, a submission WhatsApp
+                # refused, arrived as a silent "Pendiente" row.
+                if notice:
+                    request.session[PLANTILLAS_NOTICE_KEY] = notice
                 return redirect(
                     reverse("section", args=["mensajeria"])
                     + "?view=plantillas-whatsapp"

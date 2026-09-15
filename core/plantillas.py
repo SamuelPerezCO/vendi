@@ -12,7 +12,13 @@ from dataclasses import dataclass
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 
-from messaging.providers.types import TemplateSpec
+from messaging.providers.types import (
+    AUTH_BUTTON_TEXT_DEFAULT,
+    AUTH_EXPIRATION_DEFAULT,
+    AUTH_EXPIRATION_MAX,
+    AUTH_EXPIRATION_MIN,
+    TemplateSpec,
+)
 
 from .models import MessageTemplate
 
@@ -26,6 +32,15 @@ VARIABLE_RE = re.compile(r"\{\{([1-9]\d*)\}\}")
 #: A zero-padded almost-variable ({{01}}) -- rejected with guidance instead
 #: of silently treated as literal text.
 PADDED_VARIABLE_RE = re.compile(r"\{\{0\d*\}\}")
+
+#: A body that opens with a variable, closes with one, or runs two together.
+#: WhatsApp refuses all three at submission: the customer would read a
+#: message that starts, ends or continues with a bare value and no words
+#: around it. Caught here so the editor says so in Spanish, rather than the
+#: plantilla being saved and bounced minutes later.
+LEADING_VARIABLE_RE = re.compile(r"^\{\{[1-9]\d*\}\}")
+TRAILING_VARIABLE_RE = re.compile(r"\{\{[1-9]\d*\}\}$")
+ADJACENT_VARIABLES_RE = re.compile(r"\}\}\s*\{\{")
 
 NAME_MAX = 120
 TEAM_MAX = 80
@@ -44,7 +59,65 @@ MEDIA_CONTENT_PREFIXES = {
 MEDIA_MAX_BYTES = 16 * 1024 * 1024
 
 _CTA_URL_VALIDATOR = URLValidator(schemes=["http", "https"])
-PHONE_RE = re.compile(r"^\+?[\d\s().-]{5,20}$")
+
+#: A call-button number *with* its country code. The leading + is required
+#: rather than merely allowed: WhatsApp refuses a template whose phone button
+#: carries a bare local number, and "300 123 4567" used to sail through here
+#: and be rejected on submission. Digit count is checked separately, against
+#: E.164's 7..15.
+PHONE_RE = re.compile(r"^\+[\d\s().-]{6,24}$")
+DIGITS_RE = re.compile(r"\D")
+
+#: Sub-types the editor offers (they are on the reference screens) but cannot
+#: yet author: neither has anywhere to enter its cards or its offer, so a
+#: plantilla saved as one would reach WhatsApp as an ordinary custom template
+#: and come back approved as something other than what was chosen. Refused at
+#: validation until the authoring UI exists -- delete an entry here the day it
+#: does, and nothing else changes.
+UNAVAILABLE_SUB_TYPES = {"limited_time_offer", "carousel"}
+
+#: WhatsApp's own authentication copy, per language. None of it is ours to
+#: write or to submit -- the platform composes and localizes an OTP message
+#: itself, which is exactly why the editor has no fields for these words. It
+#: is kept here for two readers: ``body`` is stored on the plantilla so the
+#: Inbox's send dialog and the conversation thread have something true to
+#: show, and all three feed the editor's live preview so the person choosing
+#: the settings sees the message the customer will get.
+#:
+#: ``body`` carries the one variable, the code. ``expiration`` is a format
+#: string over the minutes chosen in the panel.
+AUTH_PREVIEW = {
+    "es": {
+        "body": "Tu código de verificación es {{1}}.",
+        "security": "No compartas este código con nadie.",
+        "expiration": "Este código vence en {minutes} minutos.",
+    },
+    "en": {
+        "body": "Your verification code is {{1}}.",
+        "security": "Do not share this code with anyone.",
+        "expiration": "This code expires in {minutes} minutes.",
+    },
+    "pt": {
+        "body": "Seu código de verificação é {{1}}.",
+        "security": "Não compartilhe este código com ninguém.",
+        "expiration": "Este código expira em {minutes} minutos.",
+    },
+}
+
+
+def auth_preview(language: str) -> dict:
+    """WhatsApp's authentication copy for ``language``. Falls back to the
+    bare language ("es_MX" -> "es") and then to Spanish -- every language the
+    editor offers is covered, the fallback is for whatever LANGUAGES grows
+    later."""
+    return AUTH_PREVIEW.get(language) or AUTH_PREVIEW.get(
+        language.split("_")[0], AUTH_PREVIEW["es"]
+    )
+
+
+def auth_body(language: str) -> str:
+    """The sentence stored as an Autenticación plantilla's ``body``."""
+    return auth_preview(language)["body"]
 
 
 #: Display labels come from the model's choice lists -- single source, so the
@@ -264,6 +337,12 @@ def form_state(post=None) -> dict:
         "cta_phone_text": "",
         "cta_phone": "",
         "samples": [],
+        # Autenticación panel. The expiry stays a string here, like every
+        # other field: form_state describes what was typed, validate() is
+        # what decides whether it is a number.
+        "auth_security_recommendation": True,
+        "auth_expiration": str(AUTH_EXPIRATION_DEFAULT),
+        "auth_button_text": AUTH_BUTTON_TEXT_DEFAULT,
     }
     if post is None:
         return state
@@ -272,8 +351,15 @@ def form_state(post=None) -> dict:
         "name", "category", "sub_type", "language", "team", "header_type",
         "header_text", "body", "footer", "button_kind",
         "cta_url_text", "cta_url", "cta_phone_text", "cta_phone",
+        "auth_expiration", "auth_button_text",
     ):
         state[key] = post.get(key, state[key]).strip()
+
+    # An unchecked checkbox posts nothing at all, so its absence is the
+    # answer -- but only on a POST that carried the panel in the first place.
+    state["auth_security_recommendation"] = bool(
+        post.get("auth_security_recommendation")
+    )
 
     if state["category"] not in CATEGORY_BY_KEY:
         state["category"] = DEFAULT_CATEGORY
@@ -319,6 +405,21 @@ def validate(state: dict, files) -> dict:
     if len(state["team"]) > TEAM_MAX:
         errors["team"] = f"Máximo {TEAM_MAX} caracteres."
 
+    if state["sub_type"] in UNAVAILABLE_SUB_TYPES:
+        label = _SUB_TYPE_LABELS[state["sub_type"]]
+        errors["sub_type"] = (
+            f"«{label}» aún no se puede crear desde aquí. Elige "
+            "«Mensaje personalizado» mientras tanto."
+        )
+
+    # Autenticación is a different form, not a variant of this one: WhatsApp
+    # writes the copy, so there is no cabecera, cuerpo, pie or botón to check
+    # -- and checking them anyway would refuse a perfectly valid plantilla
+    # for an empty body the person was never shown a field for.
+    if state["category"] == "authentication":
+        errors.update(_validate_authentication(state))
+        return errors
+
     if state["header_type"] == "text":
         if not state["header_text"]:
             errors["header_text"] = "Escribe el texto de la cabecera."
@@ -347,8 +448,11 @@ def validate(state: dict, files) -> dict:
         errors["body"] = "Escribe las variables sin ceros a la izquierda: {{1}}, {{2}}..."
     else:
         numbers = body_variables(body)
+        placement = _variable_placement_error(body)
         if sorted(numbers) != list(range(1, len(numbers) + 1)):
             errors["body"] = "Numera las variables desde {{1}} y sin saltos."
+        elif placement:
+            errors["body"] = placement
         elif any(not sample["value"] for sample in state["samples"]):
             errors["samples"] = "Escribe un valor de ejemplo para cada variable."
 
@@ -376,8 +480,11 @@ def validate(state: dict, files) -> dict:
             errors["buttons"] = (
                 "Escribe una URL válida que empiece por http:// o https://."
             )
-        elif state["cta_phone"] and not PHONE_RE.match(state["cta_phone"]):
-            errors["buttons"] = "Escribe un número de teléfono válido."
+        elif state["cta_phone"] and not _valid_cta_phone(state["cta_phone"]):
+            errors["buttons"] = (
+                "Escribe el teléfono con el código de país, empezando por + "
+                "(ej. +57 300 123 4567)."
+            )
         elif any(
             len(text) > BUTTON_TEXT_MAX
             for text in (state["cta_url_text"], state["cta_phone_text"])
@@ -385,6 +492,54 @@ def validate(state: dict, files) -> dict:
             errors["buttons"] = f"Cada botón admite máximo {BUTTON_TEXT_MAX} caracteres."
 
     return errors
+
+
+def _validate_authentication(state: dict) -> dict:
+    """The Autenticación panel's own three fields. Split out because the
+    category shares nothing with the others below the Información básica
+    block."""
+    errors = {}
+
+    expiration = state["auth_expiration"]
+    if not expiration:
+        errors["auth_expiration"] = "Escribe en cuántos minutos vence el código."
+    elif not expiration.isdigit():
+        errors["auth_expiration"] = "Escribe solo números."
+    elif not (AUTH_EXPIRATION_MIN <= int(expiration) <= AUTH_EXPIRATION_MAX):
+        errors["auth_expiration"] = (
+            f"Entre {AUTH_EXPIRATION_MIN} y {AUTH_EXPIRATION_MAX} minutos."
+        )
+
+    if len(state["auth_button_text"]) > BUTTON_TEXT_MAX:
+        errors["auth_button_text"] = f"Máximo {BUTTON_TEXT_MAX} caracteres."
+
+    return errors
+
+
+def _variable_placement_error(body: str) -> str:
+    """The Spanish reason ``body`` breaks WhatsApp's rules on where a
+    variable may sit, or "" when it breaks none.
+
+    Checked against the stripped body: trailing whitespace after a closing
+    ``}}`` does not save a template that ends in a variable, and WhatsApp
+    counts two variables separated by nothing but a space as adjacent.
+    """
+    text = body.strip()
+    if LEADING_VARIABLE_RE.search(text):
+        return "El cuerpo no puede empezar con una variable; escribe texto antes."
+    if TRAILING_VARIABLE_RE.search(text):
+        return "El cuerpo no puede terminar con una variable; escribe texto después."
+    if ADJACENT_VARIABLES_RE.search(text):
+        return "Dos variables no pueden ir seguidas; escribe texto entre ellas."
+    return ""
+
+
+def _valid_cta_phone(number: str) -> bool:
+    """True for a number WhatsApp will take on a call button: a leading +,
+    its country code, and a digit count inside E.164's 7..15."""
+    if not PHONE_RE.match(number):
+        return False
+    return 7 <= len(DIGITS_RE.sub("", number)) <= 15
 
 
 def _valid_cta_url(url: str) -> bool:
@@ -427,6 +582,9 @@ def template_spec(template) -> TemplateSpec:
         header_media=template.header_media if template.header_media else None,
         footer=template.footer,
         buttons=list(template.buttons or []),
+        auth_security_recommendation=template.auth_security_recommendation,
+        auth_code_expiration_minutes=template.auth_code_expiration_minutes,
+        auth_button_text=template.auth_button_text,
     )
 
 
@@ -460,6 +618,9 @@ def model_kwargs(state: dict, files) -> dict:
     """The MessageTemplate.objects.create kwargs for a validated state.
     Fields belonging to unselected header/button choices save empty, so a
     switched-away choice leaves no orphan data behind."""
+    if state["category"] == "authentication":
+        return _authentication_kwargs(state)
+
     header_type = state["header_type"]
     return {
         "name": state["name"],
@@ -481,5 +642,36 @@ def model_kwargs(state: dict, files) -> dict:
         ],
         "footer": state["footer"],
         "buttons": build_buttons(state),
+        "status": "pendiente",
+    }
+
+
+def _authentication_kwargs(state: dict) -> dict:
+    """The create kwargs for an Autenticación plantilla: the three settings
+    the panel collects, and nothing else.
+
+    ``body`` is the one apparent exception, and it is not really one: it
+    stores WhatsApp's own sentence for this language, never anything typed,
+    so the Inbox's send dialog knows there is one variable to fill and the
+    thread shows the customer's message instead of a blank bubble. Nothing in
+    it is submitted for approval -- ``template_spec`` does not pass it on and
+    the Meta provider would ignore it if it did.
+    """
+    return {
+        "name": state["name"],
+        "category": "authentication",
+        "sub_type": "auth_code",
+        "language": state["language"],
+        "team": state["team"],
+        "header_type": "none",
+        "header_text": "",
+        "header_media": "",
+        "body": auth_body(state["language"]),
+        "body_sample_values": ["123456"],
+        "footer": "",
+        "buttons": [],
+        "auth_security_recommendation": state["auth_security_recommendation"],
+        "auth_code_expiration_minutes": int(state["auth_expiration"]),
+        "auth_button_text": state["auth_button_text"] or AUTH_BUTTON_TEXT_DEFAULT,
         "status": "pendiente",
     }

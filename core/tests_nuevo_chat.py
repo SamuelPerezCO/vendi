@@ -43,6 +43,9 @@ class SendTemplateServiceTests(TestCase):
             params={
                 "1": "Pedro",
                 "_language": "es",
+                # Only authentication templates do anything with this, but
+                # the provider is the one that knows that.
+                "_category": "marketing",
                 "_rendered": "Hola Pedro, ¿en qué te ayudo?",
             },
         )

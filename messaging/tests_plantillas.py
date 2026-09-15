@@ -275,10 +275,111 @@ class MetaTemplateCatalogueTests(TestCase):
         import requests
 
         response = graph_response({"error": {"message": "name taken"}}, status=400)
-        response.raise_for_status.side_effect = requests.HTTPError("400")
         mock_post.return_value = response
-        with self.assertRaises(requests.HTTPError):
+        with self.assertRaises(requests.HTTPError) as caught:
             self.provider.create_template(self.spec())
+        self.assertIn("name taken", str(caught.exception))
+
+    @patch("messaging.providers.meta.requests.post")
+    def test_create_prefers_metas_own_wording_for_a_person(self, mock_post):
+        """``raise_for_status`` renders as "400 Client Error: Bad Request for
+        url: ...", which tells the person who pressed Crear plantilla
+        nothing. The reason is in the body Graph sent, and the Plantillas
+        page shows ``str(exc)`` verbatim -- so it has to travel in there."""
+        import requests
+
+        mock_post.return_value = graph_response(
+            {
+                "error": {
+                    "message": "(#100) Invalid parameter",
+                    "error_user_title": "Nombre de plantilla duplicado",
+                    "error_user_msg": "Ya existe una plantilla con ese nombre.",
+                }
+            },
+            status=400,
+        )
+        with self.assertRaises(requests.HTTPError) as caught:
+            self.provider.create_template(self.spec())
+        message = str(caught.exception)
+        self.assertIn("Nombre de plantilla duplicado", message)
+        self.assertIn("Ya existe una plantilla con ese nombre.", message)
+
+    @patch("messaging.providers.meta.requests.post")
+    def test_a_body_graph_did_not_write_still_names_the_status(self, mock_post):
+        """A proxy's HTML error page, or an empty body: no reason to quote,
+        but the status code must still reach the caller."""
+        import requests
+
+        response = graph_response({}, status=502)
+        response.json.side_effect = ValueError("not json")
+        mock_post.return_value = response
+        with self.assertRaises(requests.HTTPError) as caught:
+            self.provider.create_template(self.spec())
+        self.assertIn("502", str(caught.exception))
+
+    # --- authentication templates -------------------------------------------
+
+    @patch("messaging.providers.meta.requests.post")
+    def test_an_authentication_template_ships_metas_fixed_shape(self, mock_post):
+        """Meta writes an authentication template's copy itself and refuses
+        one that arrives with its own BODY text -- which is what this used to
+        send, so every plantilla created under Autenticación was rejected."""
+        mock_post.return_value = graph_response({"id": "9002"})
+
+        self.provider.create_template(
+            self.spec(
+                category="authentication",
+                body="Tu código de verificación es {{1}}.",
+                body_sample_values=["123456"],
+                auth_security_recommendation=True,
+                auth_code_expiration_minutes=10,
+                auth_button_text="Copiar código",
+            )
+        )
+
+        components = mock_post.call_args.kwargs["json"]["components"]
+        by_type = {component["type"]: component for component in components}
+        self.assertEqual(mock_post.call_args.kwargs["json"]["category"], "AUTHENTICATION")
+        # The body carries the flag and no text of ours.
+        self.assertEqual(
+            by_type["BODY"], {"type": "BODY", "add_security_recommendation": True}
+        )
+        self.assertNotIn("text", by_type["BODY"])
+        self.assertEqual(by_type["FOOTER"]["code_expiration_minutes"], 10)
+        self.assertEqual(
+            by_type["BUTTONS"]["buttons"],
+            [{"type": "OTP", "otp_type": "COPY_CODE", "text": "Copiar código"}],
+        )
+
+    @patch("messaging.providers.meta.requests.post")
+    def test_an_authentication_template_omits_what_was_not_asked_for(self, mock_post):
+        mock_post.return_value = graph_response({"id": "9003"})
+
+        self.provider.create_template(
+            self.spec(
+                category="authentication",
+                auth_security_recommendation=False,
+                auth_code_expiration_minutes=None,
+            )
+        )
+
+        components = mock_post.call_args.kwargs["json"]["components"]
+        by_type = {component["type"]: component for component in components}
+        self.assertEqual(by_type["BODY"], {"type": "BODY"})
+        self.assertNotIn("FOOTER", by_type)
+        # The OTP button is not optional -- Meta requires one.
+        self.assertEqual(by_type["BUTTONS"]["buttons"][0]["text"], "Copiar código")
+
+    @patch("messaging.providers.meta.requests.post")
+    def test_a_non_authentication_template_is_untouched(self, mock_post):
+        mock_post.return_value = graph_response({"id": "9004"})
+
+        self.provider.create_template(self.spec())
+
+        components = mock_post.call_args.kwargs["json"]["components"]
+        body = next(c for c in components if c["type"] == "BODY")
+        self.assertEqual(body["text"], "Hola {{1}}, tu pedido {{2}} está listo.")
+        self.assertEqual(body["example"], {"body_text": [["Ana", "#4512"]]})
 
     # --- template_verdicts --------------------------------------------------
 
@@ -372,6 +473,9 @@ class SendTemplateTests(TestCase):
                 "1": "Ana",
                 "_language": "es_MX",
                 "_rendered": "Hola Ana, tu pedido #4512 está listo.",
+                # Only authentication does anything with this, but the
+                # provider is the one that knows that.
+                "_category": "marketing",
             },
         )
 

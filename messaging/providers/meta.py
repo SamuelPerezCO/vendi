@@ -63,6 +63,7 @@ from django.utils.crypto import constant_time_compare
 from .base import MessagingProvider
 from .types import (
     MEDIA_PLACEHOLDERS,
+    AUTH_BUTTON_TEXT_DEFAULT,
     InboundEvent,
     MessageStatus,
     SendOutcomeUnknown,
@@ -171,6 +172,53 @@ _OBJECT_CHANNELS = {
 _MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
 
 
+def _graph_reason(response) -> str:
+    """The human-readable part of a Graph error body, or "" if it has none.
+
+    Meta puts the actionable sentence in ``error.error_user_title`` /
+    ``error_user_msg`` when it has copy written for a person ("El nombre de
+    la plantilla ya existe"), and in the developer-facing ``error.message``
+    otherwise. Anything else -- HTML from a proxy, an empty body -- yields
+    "", so the caller falls back to the bare status code.
+    """
+    try:
+        error = response.json().get("error") or {}
+    except (ValueError, AttributeError):
+        return ""
+    if not isinstance(error, dict):
+        return ""
+    title = str(error.get("error_user_title") or "").strip()
+    detail = str(error.get("error_user_msg") or error.get("message") or "").strip()
+    if title and detail and title != detail:
+        return f"{title}: {detail}"
+    return title or detail
+
+
+def _raise_for_graph_status(response, what: str) -> None:
+    """``raise_for_status()`` that keeps Meta's explanation.
+
+    ``requests`` renders an HTTPError as "400 Client Error: Bad Request for
+    url: ...", which says nothing about *why*, and the reason is in the JSON
+    body it discards. That matters here because this string is what the
+    person who just pressed "Crear plantilla" reads: the Plantillas page
+    shows ``str(exc)`` verbatim (core.views.plantilla_editor). The raw body
+    is still logged by the caller; only the actionable sentence travels.
+    """
+    if response.status_code < 400:
+        return
+    reason = _graph_reason(response)
+    # Meta's own sentence leads when it wrote one -- these strings get read
+    # by whoever pressed the button, and the caller's framing is already
+    # around them ("...pero WhatsApp no la aceptó para revisión: <this>").
+    # ``what`` only has to carry the context when Graph explained nothing.
+    message = (
+        f"{reason} (HTTP {response.status_code})"
+        if reason
+        else f"{what}: HTTP {response.status_code}"
+    )
+    raise requests.HTTPError(message, response=response)
+
+
 def _to_e164(number: str) -> str:
     """Meta reports numbers as bare digits (``573000000099``); the CRM stores
     E.164. Anything already prefixed is left alone."""
@@ -264,10 +312,13 @@ class MetaProvider(MessagingProvider):
         parameters in numeric order; any other key becomes a *named*
         parameter, matching templates authored with ``{{nombre}}``
         placeholders. The reserved key ``_language`` overrides the language
-        code for one send.
+        code for one send, and ``_category`` says whether this is an
+        authentication template, whose copy-code button has to be handed the
+        code a second time (see below).
         """
         params = dict(params or {})
         language = str(params.pop("_language", _DEFAULT_TEMPLATE_LANGUAGE))
+        category = str(params.pop("_category", ""))
         # Meta renders the template itself from its own approved copy; the
         # CRM's pre-rendered body is only for text-only providers.
         params.pop("_rendered", None)
@@ -284,9 +335,24 @@ class MetaProvider(MessagingProvider):
         }
         parameters = self._build_template_parameters(params)
         if parameters:
-            payload["template"]["components"] = [
-                {"type": "body", "parameters": parameters}
-            ]
+            components = [{"type": "body", "parameters": parameters}]
+            if category == "authentication":
+                # The COPY_CODE button carries the code as its own parameter:
+                # Meta refuses an authentication send that fills the body and
+                # leaves the button empty. Same value, said twice -- the first
+                # variable is the code (an authentication template has exactly
+                # one, written by Meta).
+                components.append(
+                    {
+                        "type": "button",
+                        "sub_type": "url",
+                        "index": "0",
+                        "parameters": [
+                            {"type": "text", "text": parameters[0]["text"]}
+                        ],
+                    }
+                )
+            payload["template"]["components"] = components
         return self._post_message(payload)
 
     @staticmethod
@@ -341,7 +407,7 @@ class MetaProvider(MessagingProvider):
                 payload.get("to"),
                 response.text[:500],
             )
-        response.raise_for_status()
+        _raise_for_graph_status(response, "WhatsApp rechazó el envío")
 
         data = response.json()
         try:
@@ -388,7 +454,7 @@ class MetaProvider(MessagingProvider):
                 spec.name,
                 response.text[:500],
             )
-        response.raise_for_status()
+        _raise_for_graph_status(response, "WhatsApp no aceptó la plantilla")
 
         data = response.json()
         template_id = data.get("id")
@@ -397,6 +463,9 @@ class MetaProvider(MessagingProvider):
         return str(template_id)
 
     def _build_template_components(self, spec: TemplateSpec) -> list[dict]:
+        if spec.category == "authentication":
+            return self._build_authentication_components(spec)
+
         components: list[dict] = []
 
         if spec.header_type == "text":
@@ -432,6 +501,48 @@ class MetaProvider(MessagingProvider):
         if buttons:
             components.append({"type": "BUTTONS", "buttons": buttons})
 
+        return components
+
+    @staticmethod
+    def _build_authentication_components(spec: TemplateSpec) -> list[dict]:
+        """The fixed shape Meta requires of an AUTHENTICATION template.
+
+        None of the editor's copy fields appear here, and that is the point:
+        Meta writes and localizes an authentication template's text itself
+        ("Tu código de verificación es {{1}}"), and refuses one that ships
+        its own ``BODY`` ``text`` -- which is exactly what this method used
+        to send, so every plantilla created under Autenticación was rejected
+        at submission. All Meta takes are the three knobs the editor's
+        Autenticación panel collects, and the OTP button, which is required.
+
+        ``COPY_CODE`` is the only OTP type offered: ``ONE_TAP`` and
+        ``ZERO_TAP`` need an Android package name and signing hash, which
+        this CRM has nowhere to put and no app to put there.
+        """
+        body: dict = {"type": "BODY"}
+        if spec.auth_security_recommendation:
+            body["add_security_recommendation"] = True
+
+        components: list[dict] = [body]
+        if spec.auth_code_expiration_minutes:
+            components.append(
+                {
+                    "type": "FOOTER",
+                    "code_expiration_minutes": spec.auth_code_expiration_minutes,
+                }
+            )
+        components.append(
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "OTP",
+                        "otp_type": "COPY_CODE",
+                        "text": spec.auth_button_text or AUTH_BUTTON_TEXT_DEFAULT,
+                    }
+                ],
+            }
+        )
         return components
 
     def _header_handle(self, spec: TemplateSpec) -> str:
@@ -476,7 +587,9 @@ class MetaProvider(MessagingProvider):
                 session.status_code,
                 session.text[:500],
             )
-        session.raise_for_status()
+        _raise_for_graph_status(
+            session, "WhatsApp no aceptó el archivo de la cabecera"
+        )
         session_id = session.json().get("id")
         if not session_id:
             raise ValueError(f"meta upload session without an id: {session.text[:200]}")
@@ -497,7 +610,9 @@ class MetaProvider(MessagingProvider):
             logger.error(
                 "meta upload failed: HTTP %s body=%s", upload.status_code, upload.text[:500]
             )
-        upload.raise_for_status()
+        _raise_for_graph_status(
+            upload, "WhatsApp no aceptó el archivo de la cabecera"
+        )
         handle = upload.json().get("h")
         if not handle:
             raise ValueError(f"meta upload without a handle: {upload.text[:200]}")
@@ -525,7 +640,9 @@ class MetaProvider(MessagingProvider):
                     response.status_code,
                     response.text[:500],
                 )
-            response.raise_for_status()
+            _raise_for_graph_status(
+                response, "WhatsApp no devolvió el catálogo de plantillas"
+            )
             data = response.json()
 
             for entry in data.get("data", []):
