@@ -126,8 +126,8 @@ def image_url(reply: QuickReply, request=None) -> str:
 
     Hence the order here: ``settings.PUBLIC_BASE_URL`` -- the one public
     origin -- first, always. The request is the fallback for a deployment
-    with no public origin configured at all (local development against the
-    fake provider, which never fetches anything).
+    with no public origin configured at all (local development, where Meta
+    could not reach the link anyway).
     """
     if not reply.image:
         return ""

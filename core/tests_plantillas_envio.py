@@ -6,16 +6,15 @@ editor handing a freshly saved plantilla to the provider."""
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from core.models import Client, MessageTemplate
 from messaging import services
 from messaging.models import Conversation, Message
-from messaging.providers.fake import FakeProvider
-from messaging.providers.meta import MetaProvider
 from messaging.providers.types import TemplateStatus, TemplateVerdict
+from messaging.testing import StubProvider
 
 HTMX = {"HX-Request": "true"}
 
@@ -87,12 +86,6 @@ class TemplateSendDialogTests(ConversationMixin, TestCase):
         # The body travels to the client for the live preview.
         self.assertIn("data-template-body=", html)
 
-    def test_a_pendiente_plantilla_is_offered_with_a_caveat(self):
-        plantilla(status="pendiente")
-        html = self.client.get(self.url, headers=HTMX).content.decode()
-        self.assertIn("pendiente de aprobación", html)
-        self.assertIn("aún no aprobó", html)
-
     def test_the_empty_state_links_to_the_plantillas_page(self):
         html = self.client.get(self.url, headers=HTMX).content.decode()
         self.assertIn("No hay plantillas activas", html)
@@ -141,29 +134,19 @@ class TemplateSendDialogTests(ConversationMixin, TestCase):
 
     def test_a_provider_failure_shows_in_the_thread_like_a_normal_send(self):
         entry = plantilla(body="Hola.", samples=())
-        with patch.object(FakeProvider, "send_template", side_effect=RuntimeError("down")):
+        with patch.object(StubProvider, "send_template", side_effect=RuntimeError("down")):
             response = self.client.post(self.url, {"template": entry.pk}, headers=HTMX)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No se pudo enviar la plantilla")
         self.assertEqual(Message.objects.get().status, "failed")
 
-    def test_without_a_catalogue_a_pendiente_still_sends(self):
-        # The fake provider can never approve anything, so it keeps the
-        # lenient default rather than making every plantilla unusable.
-        entry = plantilla(body="Hola.", samples=(), status="pendiente")
-        response = self.client.post(self.url, {"template": entry.pk}, headers=HTMX)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(Message.objects.get().body, "Hola.")
-
     def test_other_methods_are_not_allowed(self):
         self.assertEqual(self.client.put(self.url).status_code, 405)
 
 
-@override_settings(MESSAGING_PROVIDER="meta")
-class TemplateSendDialogOnMetaTests(ConversationMixin, TestCase):
-    """On Meta only aceptadas go out: Meta treats any other name as
-    nonexistent (132001, "template name (prueba_texto) does not exist in
-    es"). The fake provider's lenient default is TemplateSendDialogTests."""
+class TemplateSendApprovalTests(ConversationMixin, TestCase):
+    """Only aceptadas go out: Meta treats any other name as nonexistent
+    (132001, "template name (prueba_texto) does not exist in es")."""
 
     def setUp(self):
         self.chat = self.make_conversation()
@@ -175,7 +158,6 @@ class TemplateSendDialogOnMetaTests(ConversationMixin, TestCase):
         html = self.client.get(self.url, headers=HTMX).content.decode()
         self.assertIn("pedido_listo", html)
         self.assertNotIn("prueba_texto", html)
-        self.assertNotIn("pendiente de aprobación", html)
 
     def test_only_pendientes_explains_the_wait_and_points_at_the_sync(self):
         plantilla(name="prueba_texto", status="pendiente")
@@ -195,7 +177,7 @@ class TemplateSendDialogOnMetaTests(ConversationMixin, TestCase):
 
     def test_a_crafted_post_for_a_pendiente_is_refused_before_meta_hears_of_it(self):
         entry = plantilla(name="prueba_texto", status="pendiente")
-        with patch.object(MetaProvider, "send_template") as send:
+        with patch.object(StubProvider, "send_template") as send:
             response = self.client.post(self.url, {"template": entry.pk}, headers=HTMX)
         send.assert_not_called()
         self.assertEqual(response.status_code, 422)
@@ -222,7 +204,7 @@ class TemplateSendDialogOnMetaTests(ConversationMixin, TestCase):
 
     def test_an_aceptada_still_goes_out(self):
         entry = plantilla(body="Hola.", samples=())
-        with patch.object(MetaProvider, "send_template", return_value="wamid.OK") as send:
+        with patch.object(StubProvider, "send_template", return_value="wamid.OK") as send:
             response = self.client.post(self.url, {"template": entry.pk}, headers=HTMX)
         send.assert_called_once()
         self.assertEqual(response.status_code, 200)
@@ -240,14 +222,9 @@ class PlantillasSyncTests(TestCase):
         self.assertContains(response, "Sincronizar con WhatsApp")
         self.assertContains(response, reverse("plantillas_sync"))
 
-    def test_without_a_catalogue_it_says_so_instead_of_pretending(self):
-        response = self.sync()
-        self.assertContains(response, "no tiene catálogo")
-        self.assertContains(response, "fake")
-
     def test_a_verdict_updates_the_row_and_reports_the_count(self):
         entry = plantilla(status="pendiente")
-        with patch.object(FakeProvider, "template_verdicts", return_value=[
+        with patch.object(StubProvider, "template_verdicts", return_value=[
             TemplateVerdict("pedido_listo", "es", TemplateStatus.APPROVED),
         ]):
             response = self.sync()
@@ -259,14 +236,14 @@ class PlantillasSyncTests(TestCase):
 
     def test_nothing_changed_reads_as_up_to_date(self):
         plantilla(status="aceptada")
-        with patch.object(FakeProvider, "template_verdicts", return_value=[
+        with patch.object(StubProvider, "template_verdicts", return_value=[
             TemplateVerdict("pedido_listo", "es", TemplateStatus.APPROVED),
         ]):
             response = self.sync()
         self.assertContains(response, "al día")
 
     def test_a_provider_error_is_reported_not_raised(self):
-        with patch.object(FakeProvider, "template_verdicts", side_effect=RuntimeError("401")):
+        with patch.object(StubProvider, "template_verdicts", side_effect=RuntimeError("401")):
             response = self.sync()
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No se pudo consultar a WhatsApp")
@@ -305,21 +282,22 @@ class EditorSubmitsToProviderTests(TestCase):
         }
 
     def test_a_saved_plantilla_is_handed_to_the_provider(self):
-        with patch.object(FakeProvider, "create_template", return_value="4242") as create:
+        with patch.object(StubProvider, "create_template", return_value="4242") as create:
             self.client.post(reverse("plantilla_editor"), self.payload(), headers=HTMX)
         create.assert_called_once()
         entry = MessageTemplate.objects.get()
         self.assertEqual(entry.provider_template_id, "4242")
 
     def test_a_refused_submission_keeps_the_row_and_says_so(self):
-        with patch.object(FakeProvider, "create_template",
+        with patch.object(StubProvider, "create_template",
                           side_effect=RuntimeError("name already exists")):
             response = self.client.post(reverse("plantilla_editor"), self.payload(), headers=HTMX)
         self.assertEqual(MessageTemplate.objects.count(), 1)
         self.assertContains(response, "no la aceptó para revisión")
         self.assertContains(response, "name already exists")
 
-    def test_without_a_catalogue_the_save_is_quiet(self):
+    def test_a_successful_submission_is_quiet(self):
         response = self.client.post(reverse("plantilla_editor"), self.payload(), headers=HTMX)
-        self.assertEqual(MessageTemplate.objects.count(), 1)
+        entry = MessageTemplate.objects.get()
+        self.assertTrue(entry.provider_template_id.startswith("stub-tpl-"))
         self.assertNotContains(response, "tpl-notice")

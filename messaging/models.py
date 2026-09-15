@@ -449,8 +449,7 @@ class Message(models.Model):
         CRM's pre-send estimate.
 
         False for every message until its delivery receipt carries a pricing
-        object -- including every send through the fake provider, which
-        reports no billing at all.
+        object.
         """
         return bool(self.meta_pricing_type or self.meta_pricing_category)
 

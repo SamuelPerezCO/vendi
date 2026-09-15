@@ -82,8 +82,8 @@ class PublicOriginWarningTests(TestCase):
 
     @override_settings(DEBUG=True, TESTING=False, PUBLIC_BASE_URL="")
     def test_development_is_quiet(self):
-        # No production domain exists locally, and the fake provider never
-        # fetches a link; a warning here would only train people to ignore it.
+        # No production domain exists locally, and Meta could not fetch a local
+        # link anyway; a warning here would only train people to ignore it.
         from unittest import mock
 
         from core.checks import public_origin_unresolved

@@ -2,8 +2,10 @@
 
 The hole these cover let anyone on the internet write rows into the
 production database that the app then renders as real customers: the fake
-provider stayed routable on a deployment running a real provider, and its
-shared secret shipped with a value committed to the repository.
+simulator stayed routable on a deployment running a real provider, and its
+shared secret shipped with a value committed to the repository. The
+simulator is gone; these pin that its URL stays dead and that only providers
+the app really has answer at all.
 
 The database is shared with an external automation, so an injected row is
 indistinguishable from a real conversation once it lands.
@@ -14,13 +16,15 @@ from __future__ import annotations
 import json
 
 from django.conf import settings
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 
 from core.models import Client
 from messaging.models import Conversation, Message
 from messaging.providers import registry
+from messaging.testing import StubProvider
 
+#: What the fake simulator's webhook used to turn straight into a customer.
 INBOUND = {
     "events": [
         {
@@ -39,58 +43,47 @@ def url(provider: str) -> str:
     return reverse("messaging_webhook", args=[provider])
 
 
-class FakeProviderIsDevelopmentOnlyTests(TestCase):
-    """The fake provider mints contacts and messages straight out of the
-    request body. It may answer only where it is itself configured."""
+def post(client, provider: str):
+    return client.post(
+        url(provider),
+        data=json.dumps(INBOUND),
+        content_type="application/json",
+        headers={"X-Fake-Signature": "dev-secret"},
+    )
 
-    def post(self, provider="fake", secret="dev-secret"):
-        return self.client.post(
-            url(provider),
-            data=json.dumps(INBOUND),
-            content_type="application/json",
-            headers={"X-Fake-Signature": secret},
-        )
 
-    @override_settings(MESSAGING_PROVIDER="meta", MESSAGING_FAKE_SECRET="dev-secret")
-    def test_fake_webhook_is_gone_when_a_real_provider_is_active(self):
-        response = self.post()
+class RemovedFakeProviderTests(TestCase):
+    """The fake provider minted contacts and messages straight out of the
+    request body. Its URL must stay a 404, with nothing written."""
+
+    def test_the_fake_webhook_is_a_404(self):
+        response = post(self.client, "fake")
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(Message.objects.count(), 0)
         self.assertEqual(Conversation.objects.count(), 0)
         self.assertEqual(Client.objects.count(), 0)
 
-    @override_settings(MESSAGING_PROVIDER="meta")
-    def test_fake_handshake_is_gone_too(self):
-        # Otherwise it reflects hub.challenge unauthenticated on the
+    def test_its_handshake_is_gone_too(self):
+        # Otherwise it would reflect hub.challenge unauthenticated on the
         # production origin.
         response = self.client.get(url("fake"), {"hub.challenge": "<script>x</script>"})
 
         self.assertEqual(response.status_code, 404)
 
-    @override_settings(MESSAGING_PROVIDER="fake", MESSAGING_FAKE_SECRET="dev-secret")
-    def test_fake_webhook_still_works_in_development(self):
-        response = self.post()
+    def test_it_is_not_a_known_provider(self):
+        self.assertFalse(registry.is_known_provider("fake"))
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(Message.objects.count(), 1)
 
-    @override_settings(MESSAGING_PROVIDER="fake", MESSAGING_FAKE_SECRET="")
-    def test_an_unset_secret_rejects_instead_of_waving_traffic_through(self):
-        response = self.post(secret="")
+class StubWebhookTests(TestCase):
+    """The test-only stub is a known provider while tests run, so its URL
+    resolves -- and must still refuse everything."""
+
+    def test_a_request_to_the_stub_is_refused(self):
+        response = post(self.client, "stub")
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(Message.objects.count(), 0)
-
-    @override_settings(MESSAGING_PROVIDER="fake")
-    def test_the_handshake_never_reflects_as_html(self):
-        response = self.client.get(url("fake"), {"hub.challenge": "abc123"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"abc123")
-        self.assertTrue(response["Content-Type"].startswith("text/plain"))
-
-
 
 
 class ConfiguredProviderTests(TestCase):
@@ -104,10 +97,10 @@ class ConfiguredProviderTests(TestCase):
 
     def test_the_settings_list_matches_the_registry(self):
         """Two places name the providers; drift between them is the bug this
-        catches (settings cannot import the registry at settings time)."""
-        self.assertEqual(
-            sorted(settings.MESSAGING_PROVIDERS), sorted(registry._PROVIDERS)
-        )
+        catches (settings cannot import the registry at settings time). The
+        test-only stub is registered under TESTING and is not one of them."""
+        known = sorted(name for name in registry._PROVIDERS if name != StubProvider.name)
+        self.assertEqual(sorted(settings.MESSAGING_PROVIDERS), known)
 
     def test_a_provider_this_app_lacks_is_not_known(self):
         self.assertFalse(registry.is_known_provider("retirado"))

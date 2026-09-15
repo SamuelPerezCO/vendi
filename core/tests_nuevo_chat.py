@@ -5,16 +5,15 @@ closed composer's picker."""
 from datetime import timedelta
 from unittest import mock
 
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from core.models import Client, MessageTemplate
 from messaging import services as messaging_services
 from messaging.models import Conversation, Message
-from messaging.providers.fake import FakeProvider
-from messaging.providers.meta import MetaProvider
 from messaging.providers.types import InboundEvent
+from messaging.testing import StubProvider
 
 
 def template(name="saludo_inicial", body="Hola {{1}}, ¿en qué te ayudo?",
@@ -35,17 +34,13 @@ class SendTemplateServiceTests(TestCase):
         conversation = Conversation.objects.create(contact=contact, channel="whatsapp")
         self.assertFalse(conversation.is_within_24h_window)   # never wrote in
         tpl = template()
-        with mock.patch.object(FakeProvider, "send_template", return_value="tpl-1") as send:
+        with mock.patch.object(StubProvider, "send_template", return_value="tpl-1") as send:
             message = messaging_services.send_template(conversation, tpl, {"1": "Pedro"})
         send.assert_called_once_with(
             to="+573000000777",
             template_name="saludo_inicial",
             # The AGENT's value, not the editor's sample -- the whole point.
-            params={
-                "1": "Pedro",
-                "_language": "es",
-                "_rendered": "Hola Pedro, ¿en qué te ayudo?",
-            },
+            params={"1": "Pedro", "_language": "es"},
         )
         self.assertEqual(message.body, "Hola Pedro, ¿en qué te ayudo?")
         self.assertEqual(message.provider_message_id, "tpl-1")
@@ -57,7 +52,7 @@ class SendTemplateServiceTests(TestCase):
 
     def test_a_provider_error_keeps_the_row_as_failed(self):
         conversation = Conversation.objects.create(contact=client(), channel="whatsapp")
-        with mock.patch.object(FakeProvider, "send_template", side_effect=RuntimeError("no")):
+        with mock.patch.object(StubProvider, "send_template", side_effect=RuntimeError("no")):
             with self.assertRaises(messaging_services.SendFailed):
                 messaging_services.send_template(conversation, template(), {"1": "Pedro"})
         self.assertEqual(Message.objects.get().status, "failed")
@@ -180,7 +175,7 @@ class NewChatModalTests(TestCase):
     def test_a_provider_failure_keeps_the_modal_open(self):
         camila = client()
         tpl = template()
-        with mock.patch.object(FakeProvider, "send_template", side_effect=RuntimeError("no")):
+        with mock.patch.object(StubProvider, "send_template", side_effect=RuntimeError("no")):
             html = self.client.post(
                 self.URL,
                 {"cliente": camila.pk, "plantilla": tpl.pk, f"var_{tpl.pk}_1": "Camila"},
@@ -203,20 +198,11 @@ class NewChatModalTests(TestCase):
         self.assertIn(f"?nuevo={camila.pk}", html)
         self.assertIn("Nuevo chat", html)
 
-    def test_without_a_catalogue_pendientes_are_offered_with_a_badge(self):
-        # The fake provider can never approve anything: lenient default.
-        client()
-        template(name="saludo_inicial", status="pendiente")
-        html = self.client.get(self.URL).content.decode()
-        self.assertIn("saludo_inicial", html)
-        self.assertIn("quickreplies__badge", html)
 
-
-@override_settings(MESSAGING_PROVIDER="meta")
-class NewChatOnMetaTests(TestCase):
-    """On Meta the picker offers aceptadas only -- a pendiente bounces with
-    132001, "template name does not exist" -- and a crafted POST for one is
-    refused before a thread is opened or Meta is called."""
+class NewChatApprovalTests(TestCase):
+    """The picker offers aceptadas only -- a pendiente bounces with 132001,
+    "template name does not exist" -- and a crafted POST for one is refused
+    before a thread is opened or the provider is called."""
 
     URL = reverse("inbox_new_chat")
 
@@ -227,7 +213,6 @@ class NewChatOnMetaTests(TestCase):
         html = self.client.get(self.URL).content.decode()
         self.assertIn("saludo_inicial", html)
         self.assertNotIn("prueba_texto", html)
-        self.assertNotIn("quickreplies__badge", html)
 
     def test_only_pendientes_explains_the_wait_and_disables_send(self):
         client()
@@ -243,7 +228,7 @@ class NewChatOnMetaTests(TestCase):
     def test_a_crafted_post_for_a_pendiente_is_refused_and_opens_no_thread(self):
         camila = client()
         tpl = template(name="prueba_texto", status="pendiente")
-        with mock.patch.object(MetaProvider, "send_template") as send:
+        with mock.patch.object(StubProvider, "send_template") as send:
             html = self.client.post(
                 self.URL,
                 {"cliente": camila.pk, "plantilla": tpl.pk, f"var_{tpl.pk}_1": "Camila"},
@@ -267,7 +252,7 @@ class NewChatOnMetaTests(TestCase):
     def test_an_aceptada_still_opens_the_chat(self):
         camila = client()
         tpl = template()
-        with mock.patch.object(MetaProvider, "send_template", return_value="wamid.OK"):
+        with mock.patch.object(StubProvider, "send_template", return_value="wamid.OK"):
             html = self.client.post(
                 self.URL,
                 {"cliente": camila.pk, "plantilla": tpl.pk, f"var_{tpl.pk}_1": "Camila"},

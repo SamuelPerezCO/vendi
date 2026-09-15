@@ -1153,8 +1153,7 @@
 .tpl-send__input { display: block; width: 100%; height: 36px; }
 
 .tpl-send__hint,
-.tpl-send__error,
-.tpl-send__warn {
+.tpl-send__error {
   margin: 8px 0 0;
   font-size: 12px;
   line-height: 1.45;
@@ -1162,15 +1161,6 @@
 
 .tpl-send__hint { color: var(--muted); }
 .tpl-send__error { color: #9e2424; font-weight: 600; }
-
-/* A pendiente plantilla: sendable, with a caveat -- the same amber the
-   picker's Pendiente badge wears. */
-.tpl-send__warn {
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: #fdf3e0;
-  color: #92600a;
-}
 
 /* Reads like the bubble it will become. */
 .tpl-send__preview {

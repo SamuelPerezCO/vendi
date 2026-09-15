@@ -23,7 +23,7 @@ from core import agents
 from core.models import Client, MessagingSettings
 from messaging import services
 from messaging.models import Conversation, Message
-from messaging.providers.fake import FakeProvider
+from messaging.testing import StubProvider
 from messaging.providers.types import InboundEvent
 
 TWO_AGENTS = "Ana:clave-larga-a:Ana,Beto:clave-larga-b:Beto"
@@ -89,14 +89,14 @@ class WelcomeMessageTests(TestCase):
     def test_the_customers_message_survives_a_failing_greeting(self):
         # The greeting is best-effort; losing it must never lose their message.
         settings_row(welcome_enabled=True, welcome_body="Hola")
-        with mock.patch.object(FakeProvider, "send_text", side_effect=RuntimeError("down")):
+        with mock.patch.object(StubProvider, "send_text", side_effect=RuntimeError("down")):
             inbound()
         self.assertEqual(Message.objects.filter(direction="inbound").count(), 1)
 
     def test_a_failed_greeting_is_retried_on_the_next_message(self):
         # welcomed_at is handed back, so the turn is not silently burned.
         settings_row(welcome_enabled=True, welcome_body="Hola")
-        with mock.patch.object(FakeProvider, "send_text", side_effect=RuntimeError("down")):
+        with mock.patch.object(StubProvider, "send_text", side_effect=RuntimeError("down")):
             inbound(mid="a")
         self.assertIsNone(Client.objects.get().welcomed_at)
 

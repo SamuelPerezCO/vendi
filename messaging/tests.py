@@ -9,7 +9,6 @@ import tempfile
 from datetime import timedelta
 
 import requests
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -23,18 +22,52 @@ from unittest.mock import MagicMock, Mock, patch
 
 from . import services
 from .models import Conversation, ConversationTag, Message, Tag
-from .providers.fake import FakeProvider
 from .providers.meta import MetaProvider
-from .providers.registry import get_provider
 from .providers.types import InboundEvent, MessageStatus, SendOutcomeUnknown
 from .services import SendWindowClosed, send_message
+from .testing import StubProvider
 
-WEBHOOK_URL = "/webhooks/messaging/fake/"
-GOOD_SIGNATURE = {"X-Fake-Signature": settings.MESSAGING_FAKE_SECRET}
+META_WEBHOOK_URL = "/webhooks/messaging/meta/"
+META_APP_SECRET = "test-app-secret"
+META_VERIFY_TOKEN = "test-verify-token"
 
 
-def webhook_payload(events: list[dict]) -> str:
-    return json.dumps({"events": events})
+def meta_signature(payload: str) -> dict:
+    """The X-Hub-Signature-256 Meta would send for this exact body."""
+    digest = hmac.new(
+        META_APP_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return {"X-Hub-Signature-256": f"sha256={digest}"}
+
+
+def meta_payload(*, messages=None, statuses=None, contacts=None) -> str:
+    """One webhook body in Meta's nested shape."""
+    value = {
+        "messaging_product": "whatsapp",
+        "metadata": {"display_phone_number": "15551957906",
+                     "phone_number_id": "1368700699649920"},
+    }
+    if contacts is not None:
+        value["contacts"] = contacts
+    if messages is not None:
+        value["messages"] = messages
+    if statuses is not None:
+        value["statuses"] = statuses
+    return json.dumps(
+        {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {"id": "1783915395959608",
+                 "changes": [{"field": "messages", "value": value}]}
+            ],
+        }
+    )
+
+
+def process(*events: dict) -> None:
+    """Hand events to the service the webhook feeds once a signature checks
+    out -- the half of the endpoint that decides what lands in the database."""
+    services.process_inbound_events([InboundEvent(**event) for event in events])
 
 
 def message_event(**overrides) -> dict:
@@ -62,16 +95,13 @@ def outbound_event(**overrides) -> dict:
     return event
 
 
-class WebhookTests(TestCase):
-    def post_webhook(self, payload: str, headers=GOOD_SIGNATURE):
-        return self.client.post(
-            WEBHOOK_URL, data=payload, content_type="application/json", headers=headers
-        )
+class InboundMessageTests(TestCase):
+    """What a customer's message does to the database once the webhook has
+    verified and parsed it (WebhookContractTests covers that first half)."""
 
     def test_inbound_message_creates_contact_conversation_and_message(self):
-        response = self.post_webhook(webhook_payload([message_event()]))
+        process(message_event())
 
-        self.assertEqual(response.status_code, 200)
         contact = Client.objects.get(phone="+573000000099")
         self.assertEqual(contact.first_name, "Cliente Prueba")
         conversation = contact.conversations.get()
@@ -83,33 +113,63 @@ class WebhookTests(TestCase):
 
     def test_same_provider_message_id_twice_creates_one_message(self):
         """Providers retry deliveries; a retry must be a no-op."""
-        payload = webhook_payload([message_event()])
-        self.assertEqual(self.post_webhook(payload).status_code, 200)
-        self.assertEqual(self.post_webhook(payload).status_code, 200)
+        process(message_event())
+        process(message_event())
 
         self.assertEqual(Message.objects.count(), 1)
         # The duplicate must not bump counters either.
         self.assertEqual(Conversation.objects.get().unread_count, 1)
 
-    def test_bad_signature_rejected_with_401_and_nothing_created(self):
-        response = self.post_webhook(
-            webhook_payload([message_event()]), headers={"X-Fake-Signature": "forged"}
+    def test_second_message_reuses_open_conversation(self):
+        process(message_event())
+        process(message_event(provider_message_id="prov-msg-2", body="¿Y a Medellín?"))
+        self.assertEqual(Conversation.objects.count(), 1)
+        self.assertEqual(Conversation.objects.get().unread_count, 2)
+
+    def test_inbound_reopens_resolved_conversation_as_new_thread(self):
+        process(message_event())
+        conversation = Conversation.objects.get()
+        conversation.status = Conversation.RESOLVED
+        conversation.save()
+
+        process(message_event(provider_message_id="prov-msg-2"))
+        # Resolved threads are history: the new inbound starts a fresh one.
+        self.assertEqual(Conversation.objects.count(), 2)
+
+
+@override_settings(META_APP_SECRET=META_APP_SECRET)
+class WebhookContractTests(TestCase):
+    """The endpoint's contract, through Meta's webhook: verify the signature
+    before trusting a byte of the body, then answer 200 no matter what."""
+
+    def post(self, payload: str, headers=None):
+        return self.client.post(
+            META_WEBHOOK_URL, data=payload, content_type="application/json",
+            headers=headers or {},
         )
+
+    def inbound(self) -> str:
+        return meta_payload(
+            contacts=[{"wa_id": "573000000099", "profile": {"name": "Cliente Prueba"}}],
+            messages=[{"id": "wamid.IN1", "from": "573000000099", "type": "text",
+                       "text": {"body": "Hola, ¿tienen envíos a Cali?"}}],
+        )
+
+    def test_bad_signature_rejected_with_401_and_nothing_created(self):
+        response = self.post(self.inbound(), {"X-Hub-Signature-256": "sha256=forged"})
         self.assertEqual(response.status_code, 401)
         self.assertEqual(Message.objects.count(), 0)
         self.assertEqual(Client.objects.count(), 0)
 
     def test_missing_signature_rejected_with_401(self):
-        response = self.client.post(
-            WEBHOOK_URL,
-            data=webhook_payload([message_event()]),
-            content_type="application/json",
-        )
+        response = self.post(self.inbound())
         self.assertEqual(response.status_code, 401)
+        self.assertEqual(Message.objects.count(), 0)
 
     def test_unparseable_payload_still_answers_200(self):
         """Non-200 would trigger a provider retry storm over the same junk."""
-        response = self.post_webhook("this is not json")
+        payload = "this is not json"
+        response = self.post(payload, meta_signature(payload))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(Message.objects.count(), 0)
 
@@ -118,48 +178,17 @@ class WebhookTests(TestCase):
                                     content_type="application/json")
         self.assertEqual(response.status_code, 404)
 
-    def test_get_handshake_echoes_challenge(self):
-        response = self.client.get(WEBHOOK_URL, {"hub.challenge": "12345"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content.decode(), "12345")
-
-    def test_second_message_reuses_open_conversation(self):
-        self.post_webhook(webhook_payload([message_event()]))
-        self.post_webhook(
-            webhook_payload([message_event(provider_message_id="prov-msg-2",
-                                           body="¿Y a Medellín?")])
-        )
-        self.assertEqual(Conversation.objects.count(), 1)
-        self.assertEqual(Conversation.objects.get().unread_count, 2)
-
-    def test_inbound_reopens_resolved_conversation_as_new_thread(self):
-        self.post_webhook(webhook_payload([message_event()]))
-        conversation = Conversation.objects.get()
-        conversation.status = Conversation.RESOLVED
-        conversation.save()
-
-        self.post_webhook(
-            webhook_payload([message_event(provider_message_id="prov-msg-2")])
-        )
-        # Resolved threads are history: the new inbound starts a fresh one.
-        self.assertEqual(Conversation.objects.count(), 2)
-
 
 class OutboundEventTests(TestCase):
     """A message *we* sent through a channel other than the Inbox itself --
     e.g. an agent replying straight from the paired WhatsApp phone. Contrast
-    with WebhookTests: same webhook, but this is our side of the thread, not
-    the customer's, which is why unread/last_inbound_at/status don't move."""
-
-    def post_webhook(self, payload: str, headers=GOOD_SIGNATURE):
-        return self.client.post(
-            WEBHOOK_URL, data=payload, content_type="application/json", headers=headers
-        )
+    with InboundMessageTests: same processing, but this is our side of the
+    thread, not the customer's, which is why unread/last_inbound_at/status
+    don't move."""
 
     def test_outbound_event_creates_contact_conversation_and_message(self):
-        response = self.post_webhook(webhook_payload([outbound_event()]))
+        process(outbound_event())
 
-        self.assertEqual(response.status_code, 200)
         contact = Client.objects.get(phone="+573000000099")
         message = contact.conversations.get().messages.get()
         self.assertEqual(message.direction, Message.OUTBOUND)
@@ -167,14 +196,14 @@ class OutboundEventTests(TestCase):
         self.assertEqual(message.provider_message_id, "prov-out-1")
 
     def test_outbound_event_does_not_bump_unread_or_set_last_inbound_at(self):
-        self.post_webhook(webhook_payload([outbound_event()]))
+        process(outbound_event())
         conversation = Conversation.objects.get()
         self.assertEqual(conversation.unread_count, 0)
         self.assertIsNone(conversation.last_inbound_at)
 
     def test_outbound_event_reuses_the_open_conversation_from_a_prior_inbound(self):
-        self.post_webhook(webhook_payload([message_event()]))
-        self.post_webhook(webhook_payload([outbound_event()]))
+        process(message_event())
+        process(outbound_event())
 
         self.assertEqual(Conversation.objects.count(), 1)
         conversation = Conversation.objects.get()
@@ -184,27 +213,21 @@ class OutboundEventTests(TestCase):
         self.assertEqual(conversation.unread_count, 1)
 
     def test_same_provider_message_id_twice_creates_one_outbound_message(self):
-        payload = webhook_payload([outbound_event()])
-        self.assertEqual(self.post_webhook(payload).status_code, 200)
-        self.assertEqual(self.post_webhook(payload).status_code, 200)
+        process(outbound_event())
+        process(outbound_event())
         self.assertEqual(Message.objects.count(), 1)
 
     def test_outbound_event_without_to_number_is_dropped_not_crashed(self):
         """process_inbound_events isolates bad events (see its docstring) --
         the webhook has already answered 200, so this must log, not raise."""
-        response = self.post_webhook(
-            webhook_payload([outbound_event(to_number="")])
-        )
-        self.assertEqual(response.status_code, 200)
+        process(outbound_event(to_number=""))
         self.assertEqual(Message.objects.count(), 0)
         self.assertEqual(Client.objects.count(), 0)
 
     def test_self_chat_becomes_a_conversation_with_the_paired_number(self):
         """WhatsApp's "Yo" self-chat: to_number is the paired number's own,
         not a customer's -- still recorded, same as any other outbound event."""
-        self.post_webhook(
-            webhook_payload([outbound_event(to_number="+573000000001", body="nota para mí")])
-        )
+        process(outbound_event(to_number="+573000000001", body="nota para mí"))
         contact = Client.objects.get(phone="+573000000001")
         self.assertEqual(contact.conversations.get().messages.get().body, "nota para mí")
 
@@ -222,13 +245,8 @@ class StatusEventTests(TestCase):
         )
 
     def post_status(self, status: str):
-        payload = webhook_payload(
-            [{"event_type": "status", "provider_message_id": "out-1", "status": status}]
-        )
-        return self.client.post(
-            "/webhooks/messaging/fake/", data=payload,
-            content_type="application/json", headers=GOOD_SIGNATURE,
-        )
+        process({"event_type": "status", "provider_message_id": "out-1",
+                 "status": MessageStatus(status)})
 
     def test_status_moves_forward(self):
         self.post_status("delivered")
@@ -268,27 +286,9 @@ class SendWindowTests(TestCase):
         message = send_message(self.conversation, "¡Claro que sí!")
 
         self.assertEqual(message.direction, Message.OUTBOUND)
-        self.assertTrue(message.provider_message_id.startswith("fake-"))
+        self.assertTrue(message.provider_message_id.startswith("stub-"))
         self.conversation.refresh_from_db()
         self.assertEqual(self.conversation.last_message_at, message.timestamp)
-
-
-class FakeStatusProgressionTests(TestCase):
-    def test_fake_provider_advances_outbound_statuses_one_step(self):
-        contact = Client.objects.create(first_name="Sara", phone="+573000000096")
-        conversation = Conversation.objects.create(
-            contact=contact, last_inbound_at=timezone.now()
-        )
-        message = send_message(conversation, "Hola Sara")
-        # Age the message past every delay: still only one step per pump.
-        Message.objects.filter(pk=message.pk).update(
-            timestamp=timezone.now() - timedelta(seconds=60)
-        )
-
-        provider = get_provider("fake")
-        events = provider.pending_status_events()
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].status, MessageStatus.SENT)
 
 
 class UnconfirmedSendTests(TestCase):
@@ -307,7 +307,7 @@ class UnconfirmedSendTests(TestCase):
         )
 
     def send_unconfirmed(self, body="Hola Hector") -> Message:
-        with patch.object(FakeProvider, "send_text", side_effect=SendOutcomeUnknown("slow")):
+        with patch.object(StubProvider, "send_text", side_effect=SendOutcomeUnknown("slow")):
             with self.assertRaises(services.SendUnconfirmed):
                 send_message(self.conversation, body)
         return self.conversation.messages.latest("pk")
@@ -329,7 +329,7 @@ class UnconfirmedSendTests(TestCase):
         self.assertTrue(issubclass(services.SendUnconfirmed, services.SendFailed))
 
     def test_other_errors_still_mark_the_row_failed(self):
-        with patch.object(FakeProvider, "send_text", side_effect=RuntimeError("400")):
+        with patch.object(StubProvider, "send_text", side_effect=RuntimeError("400")):
             with self.assertRaises(services.SendFailed):
                 send_message(self.conversation, "Hola")
         self.assertEqual(self.conversation.messages.get().status, "failed")
@@ -378,7 +378,7 @@ class UnconfirmedSendTests(TestCase):
     def test_a_failed_row_is_never_adopted(self):
         """'failed' is the platform's refusal; a receipt for the same customer
         minutes later belongs to some other message."""
-        with patch.object(FakeProvider, "send_text", side_effect=RuntimeError("400")):
+        with patch.object(StubProvider, "send_text", side_effect=RuntimeError("400")):
             with self.assertRaises(services.SendFailed):
                 send_message(self.conversation, "Hola")
         failed = self.conversation.messages.get()
@@ -507,11 +507,11 @@ class InboxUITests(TestCase):
         self.assertEqual(response.status_code, 200)
         outbound = self.conversation.messages.get(direction=Message.OUTBOUND)
         self.assertEqual(outbound.sent_by, self.user)
-        self.assertTrue(outbound.provider_message_id.startswith("fake-"))
+        self.assertTrue(outbound.provider_message_id.startswith("stub-"))
 
     def test_unconfirmed_send_shows_a_pending_notice_not_a_failure(self):
         self.client.force_login(self.user)
-        with patch.object(FakeProvider, "send_text", side_effect=SendOutcomeUnknown("slow")):
+        with patch.object(StubProvider, "send_text", side_effect=SendOutcomeUnknown("slow")):
             response = self.client.post(
                 reverse("inbox_send", args=[self.conversation.pk]), {"body": "Hola"}
             )
@@ -525,7 +525,7 @@ class InboxUITests(TestCase):
 
     def test_failed_send_still_shows_the_retry_notice(self):
         self.client.force_login(self.user)
-        with patch.object(FakeProvider, "send_text", side_effect=RuntimeError("400")):
+        with patch.object(StubProvider, "send_text", side_effect=RuntimeError("400")):
             response = self.client.post(
                 reverse("inbox_send", args=[self.conversation.pk]), {"body": "Hola"}
             )
@@ -812,43 +812,6 @@ class BulkTagTests(TestCase):
             },
         )
         self.assertEqual(ConversationTag.objects.count(), 0)
-
-
-META_WEBHOOK_URL = "/webhooks/messaging/meta/"
-META_APP_SECRET = "test-app-secret"
-META_VERIFY_TOKEN = "test-verify-token"
-
-
-def meta_signature(payload: str) -> dict:
-    """The X-Hub-Signature-256 Meta would send for this exact body."""
-    digest = hmac.new(
-        META_APP_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
-    return {"X-Hub-Signature-256": f"sha256={digest}"}
-
-
-def meta_payload(*, messages=None, statuses=None, contacts=None) -> str:
-    """One webhook body in Meta's nested shape."""
-    value = {
-        "messaging_product": "whatsapp",
-        "metadata": {"display_phone_number": "15551957906",
-                     "phone_number_id": "1368700699649920"},
-    }
-    if contacts is not None:
-        value["contacts"] = contacts
-    if messages is not None:
-        value["messages"] = messages
-    if statuses is not None:
-        value["statuses"] = statuses
-    return json.dumps(
-        {
-            "object": "whatsapp_business_account",
-            "entry": [
-                {"id": "1783915395959608",
-                 "changes": [{"field": "messages", "value": value}]}
-            ],
-        }
-    )
 
 
 @override_settings(

@@ -819,11 +819,6 @@ def inbox_list(request, filter_key: str):
     if filter_key not in inbox.FILTER_BY_KEY:
         raise Http404(f"Unknown filter: {filter_key!r}")
 
-    # Let the fake provider deliver due receipts even when no chat is open,
-    # so tick marks keep moving while only the list is polling. No-op on
-    # real (push-based) providers.
-    messaging_services.pump_provider_events()
-
     try:
         active_id = int(request.GET.get("active", ""))
     except ValueError:
@@ -867,17 +862,13 @@ def inbox_chat(request, conversation_id: int):
 def inbox_thread(request, conversation_id: int):
     """Return just the message list of one conversation.
 
-    Targeted by the open thread's 5-second poll, which is how replies (and
-    the fake provider's delivery receipts) appear without a refresh. Polling
+    Targeted by the open thread's 5-second poll, which is how replies and
+    Meta's delivery receipts appear without a refresh. Polling
     swaps only #chat-messages, so a half-typed draft in the composer below
     is never clobbered -- except in the one moment the composer itself has
     to change, when the 24h window has flipped (see below).
     """
     conversation = get_object_or_404(Conversation, pk=conversation_id)
-
-    # Pull-based providers (the fake one) deliver their pending status events
-    # on this tick; the thread then renders with fresh tick marks.
-    messaging_services.pump_provider_events()
 
     # Still looking at the thread -- an inbound that arrived since the last
     # poll is read the moment it renders.
@@ -1026,7 +1017,7 @@ def _template_send_body_context(conversation, selected=None, values=None, error=
     when the receipt arrives. ``budget`` is the month's running total, plus
     the ceiling when ``MESSAGING_MONTHLY_BUDGET`` sets one.
     """
-    # messaging.services decides what is on offer -- on Meta, aceptadas only.
+    # messaging.services decides what is on offer: aceptadas only.
     templates = list(messaging_services.sendable_templates())
     # One window check for the whole dialog: it is the same conversation for
     # every entry, and it changes the price (a utility plantilla inside an
@@ -1171,7 +1162,7 @@ def _template_options():
     """The plantillas the Nuevo chat picker offers, body rendered with its
     samples for the preview line. messaging.services.sendable_templates
     follows the same rule send_template enforces, so nothing on offer can be
-    refused as not sendable -- on Meta that means aceptadas only."""
+    refused as not sendable: aceptadas only."""
     return [
         {"template": template, "body": plantillas.render_body(template)}
         for template in messaging_services.sendable_templates()
@@ -2290,25 +2281,17 @@ def plantillas_sync(request):
 
     Behind the "Sincronizar con WhatsApp" button. Meta reviews templates on
     its own clock and the CRM has no webhook for the verdict, so this is how
-    Pendiente becomes Aceptada (or Rechazada, with the reason). On a provider
-    without a catalogue it says so instead of pretending to have checked.
+    Pendiente becomes Aceptada (or Rechazada, with the reason).
     """
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    provider = messaging_services.get_provider()
     try:
         changed = messaging_services.sync_template_verdicts()
     except Exception as exc:
         notice = f"No se pudo consultar a WhatsApp: {exc}"
     else:
-        if not messaging_services.provider_keeps_catalogue(provider):
-            # Inherited the base no-op: there is nothing to consult.
-            notice = (
-                f"El proveedor activo ({provider.name}) no tiene catálogo de "
-                "plantillas que consultar."
-            )
-        elif changed:
+        if changed:
             notice = f"Estados actualizados: {changed} plantilla(s) cambiaron."
         else:
             notice = "Estados al día: ninguna plantilla cambió."
@@ -2498,9 +2481,7 @@ def plantilla_editor(request):
                 errors["name"] = "Ya existe una plantilla con este nombre en este idioma."
             else:
                 # Saved locally first, submitted second: a Meta hiccup must
-                # not cost the editor's work. On a provider without a
-                # catalogue (fake) this is a no-op and the
-                # plantilla simply stays a local Pendiente record.
+                # not cost the editor's work.
                 notice = None
                 try:
                     messaging_services.submit_template(template)

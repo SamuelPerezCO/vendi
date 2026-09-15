@@ -24,7 +24,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from . import services
-from .providers.registry import get_provider, is_enabled_provider
+from .providers.registry import get_provider, is_known_provider
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +33,11 @@ logger = logging.getLogger(__name__)
 @require_http_methods(["GET", "POST"])
 def webhook(request, provider_name: str):
     """Receive one provider webhook (POST) or a verification handshake (GET)."""
-    if not is_enabled_provider(provider_name):
-        # Either not a provider at all, or one that has no business answering
-        # in this environment (the fake simulator on a real deployment -- see
-        # registry.is_enabled_provider). Both are a misconfigured URL from the
+    if not is_known_provider(provider_name):
+        # Not a provider this app has -- including the retired fake simulator,
+        # whose URL must never write rows again. A misconfigured URL from the
         # caller's side, and 404 is the honest answer: here, it does not exist.
-        raise Http404(f"Messaging provider not enabled here: {provider_name!r}")
+        raise Http404(f"Unknown messaging provider: {provider_name!r}")
     provider = get_provider(provider_name)
 
     if request.method == "GET":

@@ -16,10 +16,9 @@ from django.test import TestCase, override_settings
 from core.models import Client, MessageTemplate
 from messaging import services
 from messaging.models import Conversation, Message
-from messaging.providers.base import MessagingProvider
-from messaging.providers.fake import FakeProvider
 from messaging.providers.meta import MetaProvider
 from messaging.providers.types import TemplateSpec, TemplateStatus, TemplateVerdict
+from messaging.testing import StubProvider
 
 
 def plantilla(name="pedido_listo", body="Hola {{1}}, tu pedido {{2}} está listo.",
@@ -52,23 +51,17 @@ def graph_response(payload, status=200):
 
 
 class SubmitTemplateTests(TestCase):
-    def test_a_provider_without_a_catalogue_is_a_no_op(self):
-        entry = plantilla(status="pendiente")
-        self.assertFalse(services.submit_template(entry))
-        entry.refresh_from_db()
-        self.assertEqual(entry.provider_template_id, "")
-
     def test_a_returned_id_is_recorded_and_status_reset_to_pendiente(self):
         entry = plantilla(status="aceptada")
-        with patch.object(FakeProvider, "create_template", return_value="12345"):
-            self.assertTrue(services.submit_template(entry))
+        with patch.object(StubProvider, "create_template", return_value="12345"):
+            services.submit_template(entry)
         entry.refresh_from_db()
         self.assertEqual(entry.provider_template_id, "12345")
         self.assertEqual(entry.status, "pendiente")
 
     def test_a_provider_error_becomes_a_submission_failure(self):
         entry = plantilla()
-        with patch.object(FakeProvider, "create_template", side_effect=RuntimeError("nope")):
+        with patch.object(StubProvider, "create_template", side_effect=RuntimeError("nope")):
             with self.assertRaises(services.TemplateSubmissionFailed) as caught:
                 services.submit_template(entry)
         self.assertIn("nope", str(caught.exception))
@@ -81,7 +74,7 @@ class SubmitTemplateTests(TestCase):
             header_type="text", header_text="Tu pedido", footer="Gracias",
             buttons=[{"type": "quick_reply", "text": "Ok"}], category="utility",
         )
-        with patch.object(FakeProvider, "create_template", return_value="1") as create:
+        with patch.object(StubProvider, "create_template", return_value="1") as create:
             services.submit_template(entry)
         spec = create.call_args.args[0]
         self.assertIsInstance(spec, TemplateSpec)
@@ -95,9 +88,9 @@ class SubmitTemplateTests(TestCase):
 
 class SyncTemplateVerdictsTests(TestCase):
     def verdicts(self, *entries):
-        return patch.object(FakeProvider, "template_verdicts", return_value=list(entries))
+        return patch.object(StubProvider, "template_verdicts", return_value=list(entries))
 
-    def test_a_provider_without_a_catalogue_changes_nothing(self):
+    def test_an_empty_catalogue_changes_nothing(self):
         plantilla(status="pendiente")
         self.assertEqual(services.sync_template_verdicts(), 0)
 
@@ -144,25 +137,6 @@ class SyncTemplateVerdictsTests(TestCase):
             self.assertEqual(services.sync_template_verdicts(), 0)
         entry.refresh_from_db()
         self.assertIsNotNone(entry.status_synced_at)
-
-
-class ProviderDefaultsTests(TestCase):
-    def test_the_base_class_has_no_catalogue(self):
-        fake = FakeProvider()
-        self.assertIsNone(fake.create_template(TemplateSpec("x", "es", "marketing", "hola")))
-        self.assertEqual(fake.template_verdicts(), [])
-        self.assertIs(type(fake).template_verdicts, MessagingProvider.template_verdicts)
-
-    def test_only_a_provider_that_reads_verdicts_keeps_a_catalogue(self):
-        self.assertFalse(services.provider_keeps_catalogue(FakeProvider()))
-        self.assertTrue(services.provider_keeps_catalogue(MetaProvider()))
-
-    @override_settings(MESSAGING_PROVIDER="meta")
-    def test_the_active_provider_is_checked_without_calling_meta(self):
-        # No META_WABA_ID here: asking Meta would raise, checking the class does not.
-        with patch.object(MetaProvider, "template_verdicts") as verdicts:
-            self.assertTrue(services.provider_keeps_catalogue())
-        verdicts.assert_not_called()
 
 
 @override_settings(
@@ -354,14 +328,14 @@ class MetaTemplateCatalogueTests(TestCase):
 
 
 class SendTemplateTests(TestCase):
-    """services.send_template against the fake provider (the default)."""
+    """services.send_template against the stub provider tests run on."""
 
     def test_sends_outside_the_24h_window(self):
         # The whole point: send_message would raise SendWindowClosed here.
         chat = conversation(hours_since_inbound=48)
         message = services.send_template(chat, plantilla(), {"1": "Ana", "2": "#4512"})
         self.assertEqual(message.direction, Message.OUTBOUND)
-        self.assertTrue(message.provider_message_id.startswith("fake-"))
+        self.assertTrue(message.provider_message_id.startswith("stub-"))
 
     def test_stores_the_rendered_text_not_the_template_name(self):
         chat = conversation()
@@ -371,19 +345,12 @@ class SendTemplateTests(TestCase):
     def test_passes_name_values_and_language_to_the_provider(self):
         chat = conversation()
         entry = plantilla(language="es_MX")
-        with patch.object(FakeProvider, "send_template", return_value="fake-x") as send:
+        with patch.object(StubProvider, "send_template", return_value="stub-x") as send:
             services.send_template(chat, entry, {"2": "#4512", "1": "Ana"})
         send.assert_called_once_with(
             to="+573000000777",
             template_name="pedido_listo",
-            # _rendered rides along for providers with no template catalogue,
-            # which would otherwise send the template's NAME.
-            params={
-                "2": "#4512",
-                "1": "Ana",
-                "_language": "es_MX",
-                "_rendered": "Hola Ana, tu pedido #4512 está listo.",
-            },
+            params={"2": "#4512", "1": "Ana", "_language": "es_MX"},
         )
 
     def test_bumps_the_conversation_and_records_the_sender(self):
@@ -407,16 +374,9 @@ class SendTemplateTests(TestCase):
         with self.assertRaises(services.TemplateNotSendable):
             services.send_template(chat, plantilla(is_active=False), {"1": "a", "2": "b"})
 
-    def test_a_pendiente_plantilla_goes_through(self):
-        # The fake provider keeps no catalogue, so nothing will ever approve
-        # the plantilla: it goes through. On Meta it would not (see below).
-        chat = conversation()
-        message = services.send_template(chat, plantilla(status="pendiente"), {"1": "a", "2": "b"})
-        self.assertIsNotNone(message.pk)
-
     def test_a_provider_error_keeps_the_row_as_failed(self):
         chat = conversation()
-        with patch.object(FakeProvider, "send_template", side_effect=RuntimeError("boom")):
+        with patch.object(StubProvider, "send_template", side_effect=RuntimeError("boom")):
             with self.assertRaises(services.SendFailed):
                 services.send_template(chat, plantilla(), {"1": "a", "2": "b"})
         message = Message.objects.get()
@@ -424,16 +384,15 @@ class SendTemplateTests(TestCase):
         self.assertIsNone(message.provider_message_id)
 
 
-@override_settings(MESSAGING_PROVIDER="meta")
-class CatalogueGateTests(TestCase):
-    """On a provider with a template catalogue only aceptadas send. Meta
-    answers any other name with 132001, "Template name does not exist in the
-    translation", so the service refuses first: no row, no Graph call."""
+class ApprovalGateTests(TestCase):
+    """Only aceptadas send. Meta answers any other name with 132001,
+    "Template name does not exist in the translation", so the service
+    refuses first: no row, no provider call."""
 
     def test_a_pendiente_is_refused_before_any_row_or_provider_call(self):
         chat = conversation()
         entry = plantilla(name="prueba_texto", status="pendiente")
-        with patch.object(MetaProvider, "send_template") as send:
+        with patch.object(StubProvider, "send_template") as send:
             with self.assertRaises(services.TemplateNotSendable) as caught:
                 services.send_template(chat, entry, {"1": "a", "2": "b"})
         send.assert_not_called()
@@ -448,7 +407,7 @@ class CatalogueGateTests(TestCase):
 
     def test_an_aceptada_goes_out(self):
         chat = conversation()
-        with patch.object(MetaProvider, "send_template", return_value="wamid.OK") as send:
+        with patch.object(StubProvider, "send_template", return_value="wamid.OK") as send:
             message = services.send_template(chat, plantilla(), {"1": "a", "2": "b"})
         send.assert_called_once()
         self.assertEqual(message.provider_message_id, "wamid.OK")
@@ -460,8 +419,3 @@ class CatalogueGateTests(TestCase):
         plantilla(name="d", status="rechazada")
         plantilla(name="e", status="aceptada")
         self.assertEqual(services.templates_awaiting_review(), 2)
-
-    @override_settings(MESSAGING_PROVIDER="fake")
-    def test_without_a_catalogue_nothing_awaits_review(self):
-        plantilla(status="pendiente")
-        self.assertEqual(services.templates_awaiting_review(), 0)

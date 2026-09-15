@@ -15,7 +15,7 @@ Two entry points matter:
   our side (see :func:`start_conversation`).
 * :func:`submit_template` / :func:`sync_template_verdicts` -- the plantilla
   catalogue's round trip to the provider: submit for approval, read the
-  verdicts back. No-ops on providers without a catalogue.
+  verdicts back.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ from core.models import Client
 
 from . import pricing
 from .models import Conversation, ConversationTag, Message, Tag
-from .providers.base import MessagingProvider
 from .providers.registry import get_provider
 from .providers.types import (
     InboundEvent,
@@ -73,12 +72,10 @@ class SendUnconfirmed(SendFailed):
 
 class TemplateNotSendable(Exception):
     """Raised when a plantilla cannot go out as a template message: it is
-    switched off, Meta rejected it, or -- on a provider that keeps a template
-    catalogue -- Meta has not approved it yet. Meta treats an unapproved name
-    as nonexistent (error 132001, "template name does not exist in es"), so a
-    pendiente is refused here, before any Message row or provider call. A
-    provider without a catalogue (the fake one) has no approval to wait for
-    and lets pendientes through. See :func:`check_template_sendable`."""
+    switched off, Meta rejected it, or Meta has not approved it yet. Meta
+    treats an unapproved name as nonexistent (error 132001, "template name
+    does not exist in es"), so a pendiente is refused here, before any
+    Message row or provider call. See :func:`check_template_sendable`."""
 
 
 class TemplateSubmissionFailed(Exception):
@@ -243,9 +240,6 @@ def send_template(conversation: Conversation, template, values: dict, user=None)
     provider = get_provider()
     params = {str(key): str(value) for key, value in values.items()}
     params["_language"] = template.language
-    # For providers with no template catalogue, so they send the
-    # message rather than the template's name -- see MessagingProvider.
-    params["_rendered"] = body
     try:
         provider_id = provider.send_template(
             to=conversation.contact.phone, template_name=template.name, params=params
@@ -290,21 +284,6 @@ def start_conversation(contact: Client, channel: str = "whatsapp") -> Conversati
 # --- Template catalogue ------------------------------------------------------
 
 
-def provider_keeps_catalogue(provider=None) -> bool:
-    """Whether the active provider (or ``provider``) keeps a template
-    catalogue that must approve a plantilla before it sends -- Meta does, the
-    fake provider does not.
-
-    Read off the class rather than by asking: a provider without a catalogue
-    inherits ``MessagingProvider.template_verdicts`` untouched. Asking would
-    cost Meta a Graph call on every dialog open, and fail outright when the
-    WABA settings are missing -- which does not make an unapproved plantilla
-    any more sendable.
-    """
-    provider = provider or get_provider()
-    return type(provider).template_verdicts is not MessagingProvider.template_verdicts
-
-
 def check_template_sendable(template) -> None:
     """Raise :class:`TemplateNotSendable` unless ``template`` can go out now.
 
@@ -318,7 +297,7 @@ def check_template_sendable(template) -> None:
         raise TemplateNotSendable("La plantilla está desactivada.")
     if template.status == TemplateStatus.REJECTED.value:
         raise TemplateNotSendable("WhatsApp rechazó esta plantilla; no se puede enviar.")
-    if template.status != TemplateStatus.APPROVED.value and provider_keeps_catalogue():
+    if template.status != TemplateStatus.APPROVED.value:
         raise TemplateNotSendable(
             f"La plantilla «{template.name}» sigue en revisión de Meta y WhatsApp "
             "no deja enviarla hasta que la apruebe. Pulsa «Sincronizar con "
@@ -326,12 +305,11 @@ def check_template_sendable(template) -> None:
         )
 
 
-def submit_template(template) -> bool:
-    """Submit a freshly saved plantilla to the provider for approval.
+def submit_template(template) -> None:
+    """Submit a freshly saved plantilla to the provider for approval, and
+    record the id the provider gives it (``provider_template_id``, status
+    back to pendiente).
 
-    Returns True when it was submitted (``provider_template_id`` is set) and
-    False when the active provider keeps no catalogue -- the plantilla then
-    simply stays a local record, which is what every provider but Meta means.
     Raises :class:`TemplateSubmissionFailed` when the provider objects; the
     caller decides how to show that, the row is already saved either way.
     """
@@ -344,12 +322,9 @@ def submit_template(template) -> bool:
         logger.exception("create_template %s failed", template.name)
         raise TemplateSubmissionFailed(str(exc)) from exc
 
-    if provider_id is None:
-        return False
     template.provider_template_id = provider_id
     template.status = TemplateStatus.PENDING.value
     template.save(update_fields=["provider_template_id", "status"])
-    return True
 
 
 def sync_template_verdicts() -> int:
@@ -422,45 +397,32 @@ def conversation_for_client(client: Client, channel: str = "whatsapp") -> Conver
 
 
 def sendable_templates():
-    """The plantillas the send dialogs offer, best first -- exactly the ones
-    :func:`check_template_sendable` lets through.
+    """The plantillas the send dialogs offer, by name -- exactly the ones
+    :func:`check_template_sendable` lets through: every active *aceptada*
+    plantilla and nothing else.
 
-    On a provider that keeps a template catalogue (Meta) that is every
-    active *aceptada* plantilla and nothing else: Meta treats any other name
-    as nonexistent, so offering a pendiente only sets the agent up for a
-    failed send. A plantilla joins the list once "Sincronizar con WhatsApp"
-    (:func:`sync_template_verdicts`) brings its approval in.
+    Meta treats any other name as nonexistent, so offering a pendiente only
+    sets the agent up for a failed send. A plantilla joins the list once
+    "Sincronizar con WhatsApp" (:func:`sync_template_verdicts`) brings its
+    approval in. And a rechazada stays out even when it was Meta's PAUSED or
+    DISABLED that :func:`sync_template_verdicts` stored as rechazada: what
+    matters to an agent is the same either way -- WhatsApp refuses the send.
 
-    A provider without a catalogue (fake) can never approve anything, so
-    there every active plantilla that is not rechazada is offered, pendientes
-    included, and the UI badges them.
-
-    "rechazada" carries more than a rejection: :func:`sync_template_verdicts`
-    stores Meta's PAUSED and DISABLED as rechazada too, because what matters
-    to an agent is the same either way -- WhatsApp will refuse the send.
-
-    Returns a lazy QuerySet; the views wrap it in ``list()``. "aceptada"
-    sorts before "pendiente", which is also the order to offer them in.
+    Returns a lazy QuerySet; the views wrap it in ``list()``.
     """
     from core.models import MessageTemplate  # local: core imports this module
 
-    templates = MessageTemplate.objects.filter(is_active=True)
-    if provider_keeps_catalogue():
-        templates = templates.filter(status=TemplateStatus.APPROVED.value)
-    else:
-        templates = templates.exclude(status=TemplateStatus.REJECTED.value)
-    return templates.order_by("status", "name")
+    return MessageTemplate.objects.filter(
+        is_active=True, status=TemplateStatus.APPROVED.value
+    ).order_by("name")
 
 
 def templates_awaiting_review() -> int:
-    """How many active plantillas the provider's catalogue has yet to rule
-    on -- what an empty send dialog explains itself with, instead of claiming
-    there are no plantillas. Always 0 without a catalogue, where pendientes
-    are sendable and nothing waits."""
+    """How many active plantillas Meta has yet to rule on -- what an empty
+    send dialog explains itself with, instead of claiming there are no
+    plantillas."""
     from core.models import MessageTemplate  # local: core imports this module
 
-    if not provider_keeps_catalogue():
-        return 0
     return MessageTemplate.objects.filter(
         is_active=True, status=TemplateStatus.PENDING.value
     ).count()
@@ -1065,23 +1027,3 @@ def remove_tag(conversations, tag: Tag) -> int:
         conversation__in=conversations, tag=tag
     ).delete()
     return deleted
-
-
-# --- Fake-provider pump -----------------------------------------------------
-
-
-def pump_provider_events() -> None:
-    """Let a pull-based provider (the fake one) deliver its pending events.
-
-    Real providers push webhooks; the fake provider has no server to push
-    from, so the Inbox poll endpoints call this instead. Events flow through
-    :func:`process_inbound_events` exactly like a webhook's would. A no-op
-    for providers without ``pending_status_events``.
-    """
-    provider = get_provider()
-    pending = getattr(provider, "pending_status_events", None)
-    if pending is None:
-        return
-    events = pending()
-    if events:
-        process_inbound_events(events)

@@ -22,7 +22,7 @@ uv run --with reportlab python documentacion.py ../Vendi-documentacion.pdf
   documento.
 - `generar/capturas/`: las capturas de pantalla (1440×900) y, en
   `recuadros.json`, la posición de cada recuadro rojo. Para renovarlas,
-  arranca la app con `MESSAGING_PROVIDER=fake`, crea algunos datos de ejemplo
+  arranca la app con `MESSAGING_PROVIDER=meta`, crea algunos datos de ejemplo
   y vuelve a capturar con `capturar.py`, que guarda las imágenes y las
   posiciones juntas.
 

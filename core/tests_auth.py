@@ -88,12 +88,10 @@ class LoginGateTests(TestCase):
         # Signature-authenticated (see messaging/views.py), not session-gated --
         # an unsigned request should 401, never redirect to login.
         #
-        # Meta rather than the fake provider on purpose: this class runs with
-        # TESTING=False, i.e. as a real deployment would, and there the
-        # simulator's webhook is switched off entirely
-        # (messaging.providers.registry.webhook_enabled). Meta's is the door
-        # that really is open in production, so it is the one worth asserting
-        # stays signature-gated rather than login-gated.
+        # Meta on purpose: this class runs with TESTING=False, i.e. as a real
+        # deployment would, and Meta's is the door that really is open in
+        # production, so it is the one worth asserting stays
+        # signature-gated rather than login-gated.
         response = self.client.post(
             reverse("messaging_webhook", args=["meta"]),
             data="{}",

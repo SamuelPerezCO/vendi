@@ -6,8 +6,7 @@ The same call the Plantillas page's "Sincronizar con WhatsApp" button makes
 (messaging.services.sync_template_verdicts), exposed for a cron/scheduled
 job: Meta reviews templates asynchronously and reports the verdict on its own
 timetable, so a nightly sync keeps the Estado column honest without anyone
-opening the page. On a provider without a catalogue it does nothing and says
-so.
+opening the page.
 """
 
 from django.core.management.base import BaseCommand, CommandError
