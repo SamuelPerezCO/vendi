@@ -121,8 +121,8 @@ def _thread_context(conversation) -> dict:
         "active_conversation_id": conversation.pk,
         "chat_messages": conversation.messages.all(),
         "window_open": window_open,
-        # Options for the header's assignment dropdown -- everyone configured
-        # in APP_AGENTS, whether or not they have logged in yet.
+        # Options for the header's assignment dropdown -- every agent,
+        # whether or not they have logged in yet.
         "assign_options": agents.assignment_options(conversation),
         # A closed window swaps the composer for the plantilla picker, which
         # needs the list; an open one renders nothing from it.
@@ -705,9 +705,8 @@ SECTION_CONTEXT = {
 def login_view(request):
     """The one gate in front of the whole app -- see core.middleware.
 
-    Credentials are checked against the database (``core.agents``, which
-    imports the environment's seed agents first), and a successful login
-    starts a *real* ``django.contrib.auth`` session as that User. That is
+    Credentials are checked against the database (``core.agents``), and a
+    successful login starts a *real* ``django.contrib.auth`` session as that User. That is
     what makes the agent an identity rather than a boolean: "Tu inbox" can
     filter ``assigned_to=request.user``, outbound messages record who wrote
     them, and the Inbox's assignment dropdown has a sensible default.
@@ -1338,7 +1337,7 @@ def inbox_assign(request, conversation_id: int):
                 "active_conversation": conversation,
                 # Recomputed *after* the save, not reusing ``choices``: the
                 # options include the current assignee, so moving a chat off
-                # someone who is no longer in APP_AGENTS should drop them from
+                # someone who is no longer an agent should drop them from
                 # the list rather than leave them there until the next reload.
                 "assign_options": agents.assignment_options(conversation),
             },

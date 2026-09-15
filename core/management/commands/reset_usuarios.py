@@ -1,17 +1,14 @@
-"""Delete every user row -- the clean slate before re-seeding the team.
+"""Delete every user row -- the clean slate before rebuilding the team.
 
 Written for the moment when the login list has accumulated leftovers (demo
-seeds, a teammate who left, agents seeded from an ``APP_AGENTS`` long since
-rewritten) and you want the database to hold exactly the people you are
-about to configure and nobody else.
+fixtures, a teammate who left, duplicate accounts) and you want the database
+to hold exactly the people you are about to configure and nobody else.
 
 The database owns every login (see ``core.agents``), so deleting a row is
 deleting that person's access -- permanent, which is why the Usuarios page
-deliberately offers deactivation instead. The one exception is a username
-still named in ``APP_AGENTS``: the seed is imported again at the next login,
-with the env's hash and a *new* id, so for them this is a reset to the
-environment's password rather than a lockout. It is still destructive; see
-below.
+deliberately offers deactivation instead. Afterwards ``manage.py
+crear_maestro`` is how the first master gets back in. It is destructive in a
+second way too; see below.
 
 **Deleting a row erases attribution, everywhere.** Every FK to a user is
 ``on_delete=SET_NULL``, so nothing cascades -- no conversation, message or
@@ -49,7 +46,6 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
-from core.agents import configured_agents
 from core.models import CalendarEvent, QuickReply
 from messaging.models import Conversation, ConversationTag, Message, Tag
 
@@ -86,8 +82,8 @@ class Command(BaseCommand):
             action="store_true",
             help=(
                 "Borrar también las cuentas de Django admin (is_staff / "
-                "is_superuser). Son la vía de entrada cuando APP_AGENTS "
-                "falla; por defecto se conservan."
+                "is_superuser). Son una vía de entrada si el equipo queda "
+                "fuera; por defecto se conservan."
             ),
         )
 
@@ -109,7 +105,6 @@ class Command(BaseCommand):
         target = db.get("HOST") or db.get("NAME")
         self.stdout.write(f"Base de datos: {db['ENGINE'].split('.')[-1]} · {target}")
 
-        env_usernames = {agent.username for agent in configured_agents()}
         doomed = list(users)
 
         if not doomed:
@@ -120,10 +115,6 @@ class Command(BaseCommand):
         self.stdout.write(f"\nSe borrarían {len(doomed)} usuario(s):")
         for user in doomed:
             marks = []
-            if user.username in env_usernames:
-                # The seed is imported again at next login, but the id is
-                # new: everything it was attributed with is nulled regardless.
-                marks.append("en APP_AGENTS, se vuelve a importar al entrar")
             if not user.is_active:
                 marks.append("inactivo")
             suffix = f"  ({'; '.join(marks)})" if marks else ""
@@ -159,9 +150,8 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f"\n{len(ids)} usuario(s) eliminados."))
         self.stdout.write(
-            "Los usuarios que siga nombrando APP_AGENTS se importan de nuevo al "
-            "iniciar sesión; el resto hay que volverlos a crear desde "
-            "CRM > Equipo > Usuarios o con manage.py crear_maestro."
+            "Para volver a entrar, crea el primer maestro con manage.py "
+            "crear_maestro; el resto del equipo se crea desde CRM > Equipo > Usuarios."
         )
 
     def _report_kept(self, kept_staff) -> None:

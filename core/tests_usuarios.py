@@ -1,5 +1,5 @@
-"""Tests for CRM > Equipo > Usuarios: app-created users next to the seeded
-agents, the master rule, and the login/assignment paths they plug into."""
+"""Tests for CRM > Equipo > Usuarios: the team's database users, the master
+rule, and the login/assignment paths they plug into."""
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -11,7 +11,6 @@ from core.models import Client
 from messaging.models import Conversation
 
 User = get_user_model()
-TWO_AGENTS = "Admin:admin-pw:Admin,Samuel:1234:Samuel"
 PAGE = reverse("section", args=["crm"]) + "?view=usuarios"
 
 
@@ -19,8 +18,17 @@ def app_user(username="lucia", password="clave-larga", master=False, name="Lucí
     return agents.create_user(username, password, name, master)
 
 
-@override_settings(APP_AGENTS=TWO_AGENTS, APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
-class AgentsWithDbUsersTests(TestCase):
+class TeamTestCase(TestCase):
+    """Starts with the two masters most classes below sign in as -- database
+    rows, the way crear_maestro makes them."""
+
+    def setUp(self):
+        super().setUp()
+        agents.create_user("Admin", "admin-pw", "Admin", master=True)
+        agents.create_user("Samuel", "1234", "Samuel", master=True)
+
+
+class AgentsWithDbUsersTests(TeamTestCase):
     def test_django_staff_is_not_a_crm_master(self):
         """is_staff means "may open /admin/", not "may manage this team" --
         the old generator marked its demo advisor staff, and that must not
@@ -41,7 +49,7 @@ class AgentsWithDbUsersTests(TestCase):
         agents.update_user(lucia, "Lucía", False)
         self.assertFalse(agents.is_master(lucia))
 
-    def test_seeded_agents_are_masters_and_app_users_are_not_by_default(self):
+    def test_masters_are_masters_and_app_users_are_not_by_default(self):
         admin = agents.authenticate("Admin", "admin-pw")
         lucia = app_user()
         self.assertTrue(agents.is_master(admin))
@@ -56,8 +64,7 @@ class AgentsWithDbUsersTests(TestCase):
         self.assertEqual(agent.first_name, "Lucía")
         self.assertIsNone(agents.authenticate("lucia", "otra"))
 
-    def test_a_password_changed_in_the_app_beats_the_env(self):
-        # Once imported, the row is the login: the env's old hash is history.
+    def test_a_password_changed_in_the_app_takes_effect(self):
         admin = agents.authenticate("Admin", "admin-pw")
         agents.update_user(admin, "Admin", True, "clave-nueva-db")
         self.assertIsNotNone(agents.authenticate("Admin", "clave-nueva-db"))
@@ -77,14 +84,14 @@ class AgentsWithDbUsersTests(TestCase):
         names = [user.username for user in agents.agent_users()]
         self.assertEqual(names, ["Admin", "ana", "Samuel", "zoe"])
 
-    def test_create_user_refuses_taken_and_seed_usernames(self):
+    def test_create_user_refuses_taken_usernames_in_any_case(self):
         app_user()
         with self.assertRaises(agents.UsernameTaken):
             app_user("Lucia")           # case-insensitive
         with self.assertRaises(agents.UsernameTaken):
-            app_user("Samuel")          # seed name, even before its row exists
+            app_user("samuel")          # Samuel exists; letter case doesn't matter
 
-    def test_seeded_agents_are_edited_like_anyone_else(self):
+    def test_masters_are_edited_like_anyone_else(self):
         admin = agents.authenticate("Admin", "admin-pw")
         agents.update_user(admin, "Administrador", True, "otra-clave-larga")
         admin.refresh_from_db()
@@ -101,10 +108,8 @@ class AgentsWithDbUsersTests(TestCase):
         self.assertTrue(agents.is_master(lucia))
 
 
-@override_settings(
-    TESTING=False, APP_AGENTS=TWO_AGENTS, APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD=""
-)
-class AppUserLoginTests(TestCase):
+@override_settings(TESTING=False)
+class AppUserLoginTests(TeamTestCase):
     """The real gate, with the DB user going through the login form."""
 
     def test_an_app_created_user_gets_a_real_session(self):
@@ -125,8 +130,7 @@ class AppUserLoginTests(TestCase):
         self.assertContains(response, "incorrectos")
 
 
-@override_settings(APP_AGENTS=TWO_AGENTS, APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
-class UsuariosPageTests(TestCase):
+class UsuariosPageTests(TeamTestCase):
     def login_as(self, username, password):
         # TESTING keeps the gate open; force_login sets request.user, which
         # is what the master check reads.
@@ -146,7 +150,7 @@ class UsuariosPageTests(TestCase):
         self.assertIn("Solo un usuario maestro", html)
         self.assertNotIn("+ Crear usuario", html)
 
-    def test_masters_see_the_create_button_and_the_seeded_rows(self):
+    def test_masters_see_the_create_button_and_the_team(self):
         self.login_as("Admin", "admin-pw")
         html = self.client.get(PAGE).content.decode()
         self.assertIn("+ Crear usuario", html)
@@ -254,7 +258,7 @@ class UsuariosPageTests(TestCase):
         jefe.refresh_from_db()
         self.assertTrue(jefe.is_active)
 
-    def test_seeded_agents_are_edited_from_the_page_like_anyone(self):
+    def test_other_masters_are_edited_from_the_page(self):
         self.login_as("Admin", "admin-pw")
         samuel = agents.authenticate("Samuel", "1234")
         html = self.client.get(reverse("usuario_update", args=[samuel.pk])).content.decode()
@@ -295,8 +299,7 @@ class UsuariosPageTests(TestCase):
         self.assertIn(f'aria-label="Restaurar lucia"', html)
 
 
-@override_settings(APP_AGENTS=TWO_AGENTS, APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
-class AssignmentIncludesAppUsersTests(TestCase):
+class AssignmentIncludesAppUsersTests(TeamTestCase):
     def test_an_app_user_shows_up_in_the_assignment_dropdown(self):
         lucia = app_user()
         contact = Client.objects.create(first_name="Camila", phone="+571")
@@ -309,13 +312,9 @@ class AssignmentIncludesAppUsersTests(TestCase):
 
 # --- Guards ported from the agent-assignment branch --------------------------
 
-NO_ENV = dict(APP_AGENTS="", APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
-
-
-@override_settings(**NO_ENV)
 class LastMasterTests(TestCase):
-    """With no env agent to fall back on, the team must keep one master who
-    can actually log in -- otherwise nobody can ever manage users again."""
+    """The team must keep one master who can actually log in -- otherwise
+    nobody can ever manage users again."""
 
     def test_the_only_master_cannot_be_demoted(self):
         jefa = app_user("jefa", master=True)
@@ -374,11 +373,10 @@ class LastMasterTests(TestCase):
         self.assertFalse(agents.is_master(User.objects.get(username="lucia")))
 
 
-@override_settings(APP_AGENTS=TWO_AGENTS, APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
-class SeededMastersCountTests(TestCase):
-    def test_the_last_app_master_may_go_when_the_seed_supplies_one(self):
-        """Seed entries are imported as masters with a real password before
-        the count, so they keep the set from emptying."""
+class OtherMastersCountTests(TeamTestCase):
+    def test_the_last_app_master_may_go_when_other_masters_remain(self):
+        """Admin and Samuel are masters with a real password, so they keep
+        the set from emptying."""
         jefa = app_user("jefa", master=True)
         agents.update_user(jefa, "Jefa", False)
         self.assertFalse(agents.is_master(User.objects.get(username="jefa")))
@@ -390,8 +388,8 @@ class SeededMastersCountTests(TestCase):
         self.assertFalse(jefa.is_active)
 
 
-@override_settings(TESTING=False, APP_AGENTS=TWO_AGENTS, APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
-class DeactivationEndsSessionsTests(TestCase):
+@override_settings(TESTING=False)
+class DeactivationEndsSessionsTests(TeamTestCase):
     def login(self, username, password):
         return self.client.post(
             reverse("login"), {"username": username, "password": password}
@@ -436,7 +434,6 @@ class DeactivationEndsSessionsTests(TestCase):
         self.assertIsNotNone(agents.authenticate("lucia", "clave-larga"))
 
 
-@override_settings(**NO_ENV)
 class LastMasterAndTheViewsTests(TestCase):
     """Where the guard sits relative to the screen.
 
@@ -491,9 +488,8 @@ class LastMasterAndTheViewsTests(TestCase):
         self.assertIn("único usuario maestro", html)
 
 
-@override_settings(APP_AGENTS=TWO_AGENTS)
 class ResetUsuariosCommandTests(TestCase):
-    """`manage.py reset_usuarios`: the clean slate before re-seeding a team.
+    """`manage.py reset_usuarios`: the clean slate before rebuilding a team.
 
     The command exists to be run against production, so what it *doesn't*
     do carries as much weight as what it does -- these pin both."""
@@ -519,8 +515,8 @@ class ResetUsuariosCommandTests(TestCase):
         self.assertFalse(User.objects.filter(username="lucia").exists())
 
     def test_django_admin_accounts_survive_by_default(self):
-        """They are the way back in when APP_AGENTS is wrong; wiping them
-        while re-seeding the team is how a deploy locks itself out."""
+        """They are a way back in when the team is locked out; wiping them
+        while rebuilding the team is how a deploy locks itself out."""
         User.objects.create_superuser("djangoadmin", password="clave-larga")
         app_user("lucia")
         output = self.run_command("--yes")
@@ -551,30 +547,21 @@ class ResetUsuariosCommandTests(TestCase):
         conversation.refresh_from_db()
         self.assertIsNone(conversation.assigned_to)   # SET_NULL, not cascade
 
-    def test_it_flags_a_row_that_is_still_seeded(self):
-        """The seed is imported again at next login, so 'deleted' means
-        something different for it -- the report should say so rather than
-        imply a lockout."""
-        agents.agent_users()                    # import the seed
-        output = self.run_command()
-        self.assertIn("se vuelve a importar al entrar", output)
-
-    def test_a_seeded_agent_can_still_log_in_after_the_wipe(self):
-        agents.agent_users()
-        self.run_command("--yes")
+    def test_after_the_wipe_nobody_comes_back_and_it_points_at_crear_maestro(self):
+        """With logins only in the database, a deleted account stays deleted
+        -- the report says how the first master gets back in."""
+        app_user("jefa", master=True)
+        output = self.run_command("--yes")
         self.assertEqual(User.objects.count(), 0)
-        agent = agents.authenticate("Admin", "admin-pw")
-        self.assertIsNotNone(agent)
-        self.assertEqual(agent.username, "Admin")   # re-imported from the env
-        self.assertEqual(User.objects.count(), 2)
+        self.assertIsNone(agents.authenticate("jefa", "clave-larga"))
+        self.assertIn("crear_maestro", output)
 
     def test_it_says_so_when_there_is_nothing_to_delete(self):
         self.assertIn("Nada que borrar", self.run_command())
 
 
-@override_settings(**NO_ENV)
 class CrearMaestroCommandTests(TestCase):
-    """`manage.py crear_maestro`: the way in with no seed and no master."""
+    """`manage.py crear_maestro`: the way in on a fresh database or with no master."""
 
     def run_command(self, *args, **kwargs):
         from io import StringIO

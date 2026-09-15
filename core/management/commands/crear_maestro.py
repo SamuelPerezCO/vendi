@@ -1,8 +1,8 @@
 """Create (or restore) a master user straight in the database.
 
 Every login lives in the database (see core/agents.py), and the Usuarios page
-that manages them is only open to a master -- so a deployment with no
-``APP_AGENTS`` seed, or one whose masters have all been deactivated, needs a
+that manages them is only open to a master -- so a fresh database, or one
+whose masters have all been deactivated or forgotten their passwords, needs a
 way in that does not go through the page. This is it:
 
     python manage.py crear_maestro Samuel --name Samuel
@@ -26,8 +26,8 @@ from core.management.commands.hashear_clave import ask_password
 class Command(BaseCommand):
     help = (
         "Crea un usuario maestro en la base de datos, o le restablece la "
-        "contraseña y el rol si ya existe. La vía de entrada cuando no hay "
-        "APP_AGENTS o ningún maestro puede iniciar sesión."
+        "contraseña y el rol si ya existe. La vía de entrada en una base nueva "
+        "o cuando ningún maestro puede iniciar sesión."
     )
 
     def add_arguments(self, parser):

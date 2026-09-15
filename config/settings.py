@@ -210,20 +210,9 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = (
 )
 SECURE_HSTS_PRELOAD = os.environ.get('SECURE_HSTS_PRELOAD', 'False') == 'True'
 
-# Seed for the first master users. Logins live in the database (see
-# core/agents.py); this list is imported into it -- once per username -- so
-# a fresh deployment has someone who can open CRM > Equipo > Usuarios.
-# Comma-separated `username:hash:Nombre` entries, e.g.
-#   APP_AGENTS=Admin:pbkdf2_sha256$1500000$SALT$HASH=:Admin
-# The middle field is a password hash, not a password -- generate one with
-# `manage.py hashear_clave`. Blank is fine once the team is in the database
-# (`manage.py crear_maestro` creates the first master without it).
-APP_AGENTS = os.environ.get('APP_AGENTS', '')
-
-# The pre-agents single pair, kept as a fallback so an environment that only
-# sets these two still gets in -- core.agents treats it as a one-agent list.
-APP_LOGIN_USERNAME = os.environ.get('APP_LOGIN_USERNAME', '')
-APP_LOGIN_PASSWORD = os.environ.get('APP_LOGIN_PASSWORD', '')
+# Logins live in the database (core/agents.py); `manage.py crear_maestro`
+# creates the first master. APP_AGENTS and APP_LOGIN_USERNAME/PASSWORD are
+# retired and never read -- core.checks warns (core.W004) while one is set.
 
 
 # Public legal pages (core.views.privacy / data_deletion). Meta requires a

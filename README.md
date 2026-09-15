@@ -62,7 +62,7 @@ DATABASE_URL= python manage.py reset_conversations
 
 ## Salir a producción: dejar el CRM vacío
 
-Antes de conectar el número real de WhatsApp, `go_live` vacía la aplicación y **conserva al equipo**: borra contactos, conversaciones, mensajes, etiquetas, eventos de calendario, listas, productos, plantillas, respuestas rápidas y las cuentas de prueba (las que solo existen como asignatario, p. ej. `asesor`), y deja intactas las cuentas que pueden iniciar sesión — las creadas en CRM > Equipo > Usuarios, las de `APP_AGENTS` y cualquier superusuario.
+Antes de conectar el número real de WhatsApp, `go_live` vacía la aplicación y **conserva al equipo**: borra contactos, conversaciones, mensajes, etiquetas, eventos de calendario, listas, productos, plantillas, respuestas rápidas y las cuentas de prueba (las que solo existen como asignatario, p. ej. `asesor`), y deja intactas las cuentas que pueden iniciar sesión — las creadas en CRM > Equipo > Usuarios o con `crear_maestro` y cualquier superusuario.
 
 ```bash
 python manage.py go_live          # simulación: dice qué borraría y no toca nada
@@ -99,51 +99,28 @@ mensaje enviado registre quién lo escribió. En el Inbox, el desplegable junto
 al estado de la conversación ("Abierta") cambia el agente asignado y guarda al
 instante; "Sin asignar" la devuelve a la bandeja común.
 
-### El primer maestro: la semilla `APP_AGENTS`
+### El primer maestro
 
 Una base recién creada no tiene a nadie, y la pantalla de Usuarios solo la
-abre un maestro. `APP_AGENTS` es la semilla con la que entran los primeros:
-
-```
-APP_AGENTS=Admin:pbkdf2_sha256$1500000$SALT$HASH=:Admin,Samuel:pbkdf2_sha256$1500000$SALT$HASH=:Samuel
-```
-
-Entradas separadas por coma, cada una `usuario:hash:Nombre` (el nombre visible
-es opcional y por defecto es el usuario). El campo del medio es un **hash**, no
-la contraseña en claro:
-
-```
-python manage.py hashear_clave Samuel
-```
-
-pide la contraseña por terminal (no queda en el historial del shell) e imprime
-la entrada lista para pegar. Una contraseña en claro ahí sigue funcionando —
-un redespliegue nunca puede dejar al equipo fuera — pero `manage.py check`
-avisa de cada agente que siga así (`core.W001`): quien pueda leer el entorno
-(el panel de Vercel, un log de CI, un `.env` compartido) tiene un login válido.
-Ni el hash ni la contraseña pueden llevar `:` ni `,`, que son los separadores.
-
-Cada entrada se **importa una sola vez** a la base de datos: antes de cada
-inicio de sesión (y de cada listado) el CRM crea la fila que falte con ese
-hash, ese nombre y el rol de maestro. Una fila que ya tenga contraseña propia
-no se toca: a partir de ahí manda la base de datos, así que una contraseña
-cambiada en la app se conserva, un usuario desactivado sigue fuera aunque el
-entorno lo nombre, y la variable puede borrarse cuando el equipo ya está
-dentro. Las filas espejo de la versión anterior (sin contraseña utilizable) se
-convierten en el sitio, con el mismo id, así que las conversaciones y
-mensajes atribuidos a ellas no pierden a su responsable.
-
-Si `APP_AGENTS` no está definida se usa el par antiguo
-`APP_LOGIN_USERNAME`/`APP_LOGIN_PASSWORD` como semilla de un solo agente. Sin
-ninguna de las dos, o cuando ya no queda ningún maestro que pueda entrar:
+abre un maestro. El primero se crea directamente en la base de datos:
 
 ```
 python manage.py crear_maestro Samuel --name Samuel
 ```
 
-crea el maestro directamente en la base de datos (pide la contraseña por
-terminal). Sobre un usuario que ya existe no falla: le restablece la
-contraseña, lo restaura si estaba desactivado y lo hace maestro.
+pide la contraseña por terminal (no queda en el historial del shell) y crea
+el usuario maestro. Sobre un usuario que ya existe no falla: le restablece la
+contraseña, lo restaura si estaba desactivado y lo hace maestro, así que
+también es la salida cuando ningún maestro puede entrar.
+
+Nada de usuarios se lee del entorno. `APP_AGENTS`, `APP_LOGIN_USERNAME` y
+`APP_LOGIN_PASSWORD`, que en versiones anteriores sembraban los primeros
+maestros, ya no se usan: si siguen definidas, `manage.py check` las nombra
+(`core.W004`) para que se borren.
+
+Para fijar una contraseña a mano en la base sin compartirla,
+`python manage.py hashear_clave` imprime su hash en tu equipo; esa línea es
+la que va en `auth_user.password`.
 
 ### Usuarios (maestros y agentes)
 
@@ -151,8 +128,7 @@ Desde CRM > Equipo > Usuarios un **maestro** crea al resto del equipo. Un
 usuario creado ahí inicia sesión por el mismo formulario, aparece en el
 desplegable de asignación y en "Tu inbox", y puede marcarse también como
 maestro. Los usuarios se desactivan (nunca se borran): su historial de
-conversaciones y mensajes sigue apuntando a ellos. Los agentes que entraron
-por la semilla se editan igual que los demás. El último maestro que pueda
+conversaciones y mensajes sigue apuntando a ellos. El último maestro que pueda
 iniciar sesión no puede degradarse ni desactivarse: sin él nadie podría
 volver a administrar el equipo.
 

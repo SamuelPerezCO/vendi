@@ -1,65 +1,38 @@
-"""Tests for the login gate's harder edges: hashed APP_AGENTS seeds, the
-non-ASCII crash, and the doors a Usuarios master must not be able to open."""
+"""Tests for the login gate's harder edges: the non-ASCII crash, the retired
+environment logins, password fingerprints, and the doors a Usuarios master
+must not be able to open."""
 
 from io import StringIO
 from unittest import mock
 
 from django.contrib.auth import get_user_model
-from django.contrib.auth.hashers import make_password
+from django.contrib.auth.hashers import check_password
 from django.contrib.sessions.models import Session
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from core import agents
-from core.checks import plaintext_env_secrets
+from core.checks import retired_login_env_vars
 from core.middleware import SESSION_KEY
 
 User = get_user_model()
-HASH = make_password("clave-larga")
 
 
 class NonAsciiLoginTests(TestCase):
-    """`hmac.compare_digest` on str raises TypeError for any non-ASCII
-    character, so a login as "José" used to 500 before checking anything."""
+    """A login as "José" once reached ``hmac.compare_digest`` on a str, which
+    raises TypeError for any non-ASCII character -- a 500 before anything was
+    checked. The edge still deserves a pin."""
 
-    @override_settings(APP_AGENTS="Admin:admin-pw:Admin")
     def test_a_non_ascii_username_is_rejected_not_a_crash(self):
-        self.assertIsNone(agents.authenticate("José", "admin-pw"))
+        agents.create_user("Admin", "clave-larga", "Admin", master=True)
+        self.assertIsNone(agents.authenticate("José", "clave-larga"))
         self.assertIsNone(agents.authenticate("Ünïcödé", "x"))
 
-    @override_settings(APP_AGENTS="José:clave:José")
-    def test_a_non_ascii_username_can_still_log_in(self):
-        self.assertIsNotNone(agents.authenticate("José", "clave"))
-        self.assertIsNone(agents.authenticate("José", "otra"))
-
-
-class HashedEnvSecretTests(TestCase):
-    @override_settings(APP_AGENTS=f"Admin:{HASH}:Admin")
-    def test_a_hashed_secret_authenticates(self):
-        self.assertIsNotNone(agents.authenticate("Admin", "clave-larga"))
-        self.assertIsNone(agents.authenticate("Admin", "otra-clave"))
-
-    @override_settings(APP_AGENTS=f"Admin:{HASH}:Admin")
-    def test_the_hash_itself_is_not_a_password(self):
-        self.assertIsNone(agents.authenticate("Admin", HASH))
-
-    @override_settings(APP_AGENTS="Admin:admin-pw:Admin")
-    def test_a_raw_secret_still_works_so_a_redeploy_locks_nobody_out(self):
-        self.assertIsNotNone(agents.authenticate("Admin", "admin-pw"))
-
-    @override_settings(APP_AGENTS=f"Uno:{HASH}:Uno,Dos:raw-pw:Dos")
-    def test_hashed_and_raw_entries_coexist(self):
-        self.assertIsNotNone(agents.authenticate("Uno", "clave-larga"))
-        self.assertIsNotNone(agents.authenticate("Dos", "raw-pw"))
-        self.assertIsNone(agents.authenticate("Uno", "raw-pw"))
-
-    def test_is_hashed_does_not_mistake_a_long_passphrase_for_md5(self):
-        # identify_hasher reads any bare 32-char string as unsalted MD5.
-        self.assertFalse(agents.Agent("u", "x" * 32, "u").is_hashed)
-        self.assertFalse(agents.Agent("u", "no-dollar-sign", "u").is_hashed)
-        self.assertFalse(agents.Agent("u", "nosuchalgo$rest", "u").is_hashed)
-        self.assertTrue(agents.Agent("u", HASH, "u").is_hashed)
+    def test_a_non_ascii_username_and_password_can_log_in(self):
+        agents.create_user("José", "contraseña-ñ", "José")
+        self.assertIsNotNone(agents.authenticate("José", "contraseña-ñ"))
+        self.assertIsNone(agents.authenticate("José", "contrasena-n"))
 
 
 class PublicOriginWarningTests(TestCase):
@@ -139,43 +112,105 @@ class PublicOriginWarningTests(TestCase):
         self.assertEqual(warning.id, "core.W003")
 
 
-class PlaintextWarningTests(TestCase):
-    @override_settings(APP_AGENTS="Admin:admin-pw:Admin,Otro:otra:Otro")
-    def test_it_names_every_plaintext_agent(self):
-        [warning] = plaintext_env_secrets(None)
-        self.assertEqual(warning.id, "core.W001")
-        self.assertIn("'Admin'", warning.msg)
-        self.assertIn("'Otro'", warning.msg)
-        self.assertIn("hashear_clave", warning.hint)
+class RetiredLoginEnvWarningTests(TestCase):
+    """core.W004: the environment variables that used to seed logins."""
 
-    @override_settings(APP_AGENTS=f"Admin:{HASH}:Admin")
-    def test_a_fully_hashed_environment_is_quiet(self):
-        self.assertEqual(plaintext_env_secrets(None), [])
+    RETIRED = {"APP_AGENTS": "", "APP_LOGIN_USERNAME": "", "APP_LOGIN_PASSWORD": ""}
+
+    def run_check(self, **env):
+        with mock.patch.dict("os.environ", {**self.RETIRED, **env}):
+            return retired_login_env_vars(None)
+
+    def test_quiet_when_none_is_set(self):
+        self.assertEqual(self.run_check(), [])
+
+    def test_names_every_leftover_variable(self):
+        [warning] = self.run_check(
+            APP_AGENTS="Admin:pbkdf2_sha256$x:Admin", APP_LOGIN_PASSWORD="vieja"
+        )
+        self.assertEqual(warning.id, "core.W004")
+        self.assertIn("APP_AGENTS", warning.msg)
+        self.assertIn("APP_LOGIN_PASSWORD", warning.msg)
+        self.assertNotIn("APP_LOGIN_USERNAME", warning.msg)
+        self.assertIn("crear_maestro", warning.hint)
+
+    def test_never_shows_the_values(self):
+        [warning] = self.run_check(APP_LOGIN_PASSWORD="clave-secreta-vieja")
+        self.assertNotIn("clave-secreta-vieja", warning.msg + warning.hint)
+
+    def test_a_blank_variable_does_not_count(self):
+        self.assertEqual(self.run_check(APP_AGENTS="   "), [])
+
+    def test_the_variables_open_no_account(self):
+        """Set in the environment and in settings alike, they create nobody
+        and let nobody in."""
+        env = {
+            "APP_AGENTS": "Admin:admin-pw:Admin",
+            "APP_LOGIN_USERNAME": "viejo",
+            "APP_LOGIN_PASSWORD": "clave-vieja",
+        }
+        with mock.patch.dict("os.environ", env), override_settings(**env):
+            self.assertIsNone(agents.authenticate("Admin", "admin-pw"))
+            self.assertIsNone(agents.authenticate("viejo", "clave-vieja"))
+            self.assertEqual(agents.agent_users(), [])
+        self.assertEqual(User.objects.count(), 0)
 
 
 class HashearClaveCommandTests(TestCase):
-    def test_it_prints_a_pasteable_entry(self):
+    """`manage.py hashear_clave`: a password's fingerprint, printed locally, so
+    a password can be set straight in the database without being shared."""
+
+    def run_command(self, *args, **kwargs):
         out = StringIO()
-        call_command("hashear_clave", "Samuel", password="clave-larga", stdout=out)
-        printed = out.getvalue()
-        self.assertIn("Samuel:", printed)
-        self.assertIn("pbkdf2_sha256$", printed)
-        # And the hash it printed actually accepts the password.
-        entry = next(l for l in printed.splitlines() if l.startswith("Samuel:"))
-        with override_settings(APP_AGENTS=entry.strip()):
-            self.assertIsNotNone(agents.authenticate("Samuel", "clave-larga"))
+        call_command("hashear_clave", *args, stdout=out, **kwargs)
+        return out.getvalue().strip()
 
-    def test_it_refuses_a_password_below_the_floor(self):
-        with self.assertRaises(Exception):
-            call_command("hashear_clave", "Samuel", password="corta")
+    def test_it_prints_only_a_hash_that_accepts_the_password(self):
+        encoded = self.run_command(password="clave-larga")
+        self.assertTrue(encoded.startswith("pbkdf2_sha256$"))
+        self.assertEqual(len(encoded.splitlines()), 1)
+        self.assertNotIn("clave-larga", encoded)
+        self.assertTrue(check_password("clave-larga", encoded))
+        self.assertFalse(check_password("otra-clave", encoded))
+
+    def test_the_hash_set_on_an_account_logs_it_in(self):
+        user = agents.create_user("samuel", "clave-vieja", "Samuel", master=True)
+        user.password = self.run_command("samuel", password="clave-nueva-1")
+        user.save(update_fields=["password"])
+        self.assertIsNotNone(agents.authenticate("samuel", "clave-nueva-1"))
+        self.assertIsNone(agents.authenticate("samuel", "clave-vieja"))
+
+    def test_it_applies_the_password_floor(self):
+        for bad, message in (("corta", "al menos 8"), ("12345678", "solo números")):
+            with self.subTest(bad):
+                with self.assertRaisesMessage(CommandError, message):
+                    self.run_command(password=bad)
+
+    def test_the_username_refuses_a_password_equal_to_it(self):
+        with self.assertRaisesMessage(CommandError, "igual al usuario"):
+            self.run_command("samuelperez", password="SamuelPerez")
+
+    def test_it_prompts_twice_and_refuses_a_mismatch(self):
+        import core.management.commands.hashear_clave as cmd
+
+        with mock.patch.object(cmd, "getpass", side_effect=["clave-larga", "clave-larga"]):
+            self.assertTrue(check_password("clave-larga", self.run_command()))
+        with mock.patch.object(cmd, "getpass", side_effect=["uno-largo-1", "dos-largo-2"]):
+            with self.assertRaisesMessage(CommandError, "no coinciden"):
+                self.run_command()
+
+    def test_the_old_app_agents_modes_are_gone(self):
+        """Several usernames used to print a whole APP_AGENTS line."""
+        with self.assertRaises(CommandError):
+            self.run_command("Admin", "Samuel", password="clave-larga")
 
 
-@override_settings(APP_AGENTS="Admin:admin-pw:Admin")
 class AdminAccountsAreNotTeammatesTests(TestCase):
     """A Django staff/superuser row must never be listed or editable on the
     Usuarios page: a master could reset its password and walk into /admin."""
 
     def setUp(self):
+        self.master = agents.create_user("jefe", "clave-larga", "Jefe", master=True)
         self.staff = User.objects.create_user("djangoadmin", password="clave-larga")
         self.staff.is_staff = True
         self.staff.save()
@@ -185,14 +220,14 @@ class AdminAccountsAreNotTeammatesTests(TestCase):
         self.assertNotIn(self.staff, agents.agent_users())
 
     def test_it_is_not_listed_on_the_usuarios_page(self):
-        self.client.force_login(agents.authenticate("Admin", "admin-pw"))
+        self.client.force_login(self.master)
         html = self.client.get(
             reverse("section", args=["crm"]), {"view": "usuarios"}
         ).content.decode()
         self.assertNotIn("djangoadmin", html)
 
     def test_its_password_cannot_be_reset_from_here(self):
-        self.client.force_login(agents.authenticate("Admin", "admin-pw"))
+        self.client.force_login(self.master)
         response = self.client.post(
             reverse("usuario_update", args=[self.staff.pk]),
             {"display_name": "x", "password": "nueva-clave", "password2": "nueva-clave"},
@@ -203,10 +238,9 @@ class AdminAccountsAreNotTeammatesTests(TestCase):
 
 
 class LastMasterGuardTests(TestCase):
-    """With APP_AGENTS empty, the team is only administrable from the
-    database -- so the final master must not be able to remove themselves."""
+    """The team is only administrable from the database, so the final master
+    must not be able to remove themselves."""
 
-    @override_settings(APP_AGENTS="", APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
     def test_the_only_master_cannot_be_demoted_or_deactivated(self):
         solo = agents.create_user("jefe", "clave-larga", "Jefe", master=True)
         with self.assertRaises(agents.LastMaster):
@@ -217,23 +251,20 @@ class LastMasterGuardTests(TestCase):
         self.assertTrue(agents.is_master(solo))
         self.assertTrue(solo.is_active)
 
-    @override_settings(APP_AGENTS="", APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
     def test_with_a_second_master_the_first_may_step_down(self):
         one = agents.create_user("uno", "clave-larga", "Uno", master=True)
         agents.create_user("dos", "clave-larga", "Dos", master=True)
         agents.update_user(one, "Uno", master=False)
         self.assertFalse(agents.is_master(one))
 
-    @override_settings(APP_AGENTS="Admin:admin-pw:Admin")
-    def test_seeded_agents_satisfy_the_guard(self):
-        # The seed is imported as a master with a real password before the
-        # count, so it names someone who can administer the team.
+    def test_a_superuser_satisfies_the_guard(self):
+        # A superuser can always sign in and administer the team.
+        User.objects.create_superuser("root", password="clave-larga")
         solo = agents.create_user("jefe", "clave-larga", "Jefe", master=True)
         agents.update_user(solo, "Jefe", master=False)
         self.assertFalse(agents.is_master(solo))
 
 
-@override_settings(APP_AGENTS="Admin:admin-pw:Admin")
 class DeactivationEndsSessionsTests(TestCase):
     def test_deactivating_drops_the_live_session(self):
         lucia = agents.create_user("lucia", "clave-larga", "Lucía")
@@ -265,7 +296,6 @@ class DeactivationEndsSessionsTests(TestCase):
                 self.assertEqual(self.client.get(reverse(name)).status_code, 200)
 
 
-@override_settings(APP_AGENTS="Admin:admin-pw:Admin")
 class SelfPasswordResetTests(TestCase):
     def test_resetting_your_own_password_does_not_log_you_out(self):
         jefe = agents.create_user("jefe", "clave-larga", "Jefe", master=True)
@@ -280,25 +310,3 @@ class SelfPasswordResetTests(TestCase):
         self.assertEqual(
             self.client.get(reverse("section", args=["crm"])).status_code, 200
         )
-
-
-class HashearClaveManyAgentsTests(TestCase):
-    """Rehashing a team by hand is where a stray comma produces an
-    APP_AGENTS that parses to fewer agents than you meant -- on a deploy
-    nobody can then log in to fix."""
-
-    def test_several_agents_print_one_pasteable_line(self):
-        # The command prompts per agent; drive it with a scripted getpass.
-        import core.management.commands.hashear_clave as cmd
-        answers = iter(["clave-larga-1", "clave-larga-1", "clave-larga-2", "clave-larga-2"])
-        with mock.patch.object(cmd, "getpass", lambda *a, **k: next(answers)):
-            out = StringIO()
-            call_command("hashear_clave", "Admin", "Samuel", stdout=out)
-        line = next(l for l in out.getvalue().splitlines() if l.startswith("APP_AGENTS="))
-        with override_settings(APP_AGENTS=line.split("=", 1)[1]):
-            self.assertEqual(
-                [a.username for a in agents.configured_agents()], ["Admin", "Samuel"]
-            )
-            self.assertIsNotNone(agents.authenticate("Admin", "clave-larga-1"))
-            self.assertIsNotNone(agents.authenticate("Samuel", "clave-larga-2"))
-            self.assertIsNone(agents.authenticate("Admin", "clave-larga-2"))
