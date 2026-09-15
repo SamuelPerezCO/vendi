@@ -121,6 +121,7 @@ class SendableTemplatesTests(TestCase):
         self.assertEqual(offered, ["ok"])
 
     def test_approved_ones_come_first(self):
+        # Without a catalogue (fake) pendientes stay on offer, after aceptadas.
         template(name="zz_aprobada", status="aceptada")
         template(name="aa_pendiente", status="pendiente")
 
@@ -128,6 +129,16 @@ class SendableTemplatesTests(TestCase):
             [t.name for t in services.sendable_templates()],
             ["zz_aprobada", "aa_pendiente"],
         )
+
+    @override_settings(MESSAGING_PROVIDER="meta")
+    def test_with_a_catalogue_only_aceptadas_are_offered(self):
+        # Meta refuses any other name as nonexistent (132001).
+        template(name="ok")
+        template(name="prueba_texto", status="pendiente")
+        template(name="no", status="rechazada")
+        template(name="off", is_active=False)
+
+        self.assertEqual([t.name for t in services.sendable_templates()], ["ok"])
 
 
 class ConversationForClientTests(TestCase):

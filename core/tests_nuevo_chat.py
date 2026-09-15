@@ -5,7 +5,7 @@ closed composer's picker."""
 from datetime import timedelta
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -13,6 +13,7 @@ from core.models import Client, MessageTemplate
 from messaging import services as messaging_services
 from messaging.models import Conversation, Message
 from messaging.providers.fake import FakeProvider
+from messaging.providers.meta import MetaProvider
 from messaging.providers.types import InboundEvent
 
 
@@ -171,8 +172,10 @@ class NewChatModalTests(TestCase):
         camila = client()
         bad = template(name="mala", status="rechazada")
         html = self.client.post(self.URL, {"cliente": camila.pk, "plantilla": bad.pk}).content.decode()
-        self.assertIn("Elige una plantilla", html)
+        self.assertIn("WhatsApp rechazó esta plantilla", html)
         self.assertEqual(Message.objects.count(), 0)
+        # Refused before start_conversation: no empty thread left behind.
+        self.assertEqual(Conversation.objects.count(), 0)
 
     def test_a_provider_failure_keeps_the_modal_open(self):
         camila = client()
@@ -199,6 +202,78 @@ class NewChatModalTests(TestCase):
         html = self.client.get(reverse("cliente_detail", args=[camila.pk])).content.decode()
         self.assertIn(f"?nuevo={camila.pk}", html)
         self.assertIn("Nuevo chat", html)
+
+    def test_without_a_catalogue_pendientes_are_offered_with_a_badge(self):
+        # The fake provider can never approve anything: lenient default.
+        client()
+        template(name="saludo_inicial", status="pendiente")
+        html = self.client.get(self.URL).content.decode()
+        self.assertIn("saludo_inicial", html)
+        self.assertIn("quickreplies__badge", html)
+
+
+@override_settings(MESSAGING_PROVIDER="meta")
+class NewChatOnMetaTests(TestCase):
+    """On Meta the picker offers aceptadas only -- a pendiente bounces with
+    132001, "template name does not exist" -- and a crafted POST for one is
+    refused before a thread is opened or Meta is called."""
+
+    URL = reverse("inbox_new_chat")
+
+    def test_the_picker_offers_only_aceptadas(self):
+        client()
+        template(name="saludo_inicial")
+        template(name="prueba_texto", status="pendiente")
+        html = self.client.get(self.URL).content.decode()
+        self.assertIn("saludo_inicial", html)
+        self.assertNotIn("prueba_texto", html)
+        self.assertNotIn("quickreplies__badge", html)
+
+    def test_only_pendientes_explains_the_wait_and_disables_send(self):
+        client()
+        template(name="prueba_texto", status="pendiente")
+        template(name="prueba_imagen", status="pendiente")
+        html = self.client.get(self.URL).content.decode()
+        self.assertIn("2 plantillas en revisión de Meta", html)
+        self.assertIn("Sincronizar con WhatsApp", html)
+        self.assertIn("view=plantillas-whatsapp", html)
+        self.assertNotIn("No hay plantillas activas", html)
+        self.assertIn("disabled", html)
+
+    def test_a_crafted_post_for_a_pendiente_is_refused_and_opens_no_thread(self):
+        camila = client()
+        tpl = template(name="prueba_texto", status="pendiente")
+        with mock.patch.object(MetaProvider, "send_template") as send:
+            html = self.client.post(
+                self.URL,
+                {"cliente": camila.pk, "plantilla": tpl.pk, f"var_{tpl.pk}_1": "Camila"},
+            ).content.decode()
+        send.assert_not_called()
+        self.assertIn("«prueba_texto» sigue en revisión de Meta", html)
+        self.assertNotIn("data-dialog-dismiss", html)
+        self.assertEqual(Conversation.objects.count(), 0)
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_the_refused_form_lands_on_a_plantilla_on_offer_with_its_inputs(self):
+        camila = client()
+        on_offer = template(name="saludo_inicial")
+        pending = template(name="prueba_texto", status="pendiente")
+        html = self.client.post(
+            self.URL, {"cliente": camila.pk, "plantilla": pending.pk}
+        ).content.decode()
+        self.assertIn(f'name="var_{on_offer.pk}_1"', html)
+        self.assertNotIn(f'name="var_{pending.pk}_1"', html)
+
+    def test_an_aceptada_still_opens_the_chat(self):
+        camila = client()
+        tpl = template()
+        with mock.patch.object(MetaProvider, "send_template", return_value="wamid.OK"):
+            html = self.client.post(
+                self.URL,
+                {"cliente": camila.pk, "plantilla": tpl.pk, f"var_{tpl.pk}_1": "Camila"},
+            ).content.decode()
+        self.assertIn("data-dialog-dismiss", html)
+        self.assertEqual(Message.objects.get().provider_message_id, "wamid.OK")
 
 
 class ClosedComposerTests(TestCase):

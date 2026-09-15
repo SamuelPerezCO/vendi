@@ -1,13 +1,17 @@
 {% comment %}
-  The plantilla picker -- one radio per usable WhatsApp template, body
-  rendered with its sample values. Shared by the Nuevo chat modal and the
-  closed composer, which wrap it in their own <form>.
+  The plantilla picker -- one radio per sendable WhatsApp template, body
+  rendered with its sample values. Used by the Nuevo chat modal, which wraps
+  it in its own <form>.
 
-  Pendientes are offered with a badge: the MVP has no approval pipeline, so
-  hiding them would hide every plantilla the team wrote; Meta rejects an
-  unapproved one at send time and the thread shows the failure.
+  What is on offer is messaging.services.sendable_templates. On Meta that is
+  aceptadas only -- Meta refuses any other name as nonexistent -- so the
+  Pendiente badge only ever shows on a provider without a catalogue (fake),
+  where nothing can be approved and pendientes are offered as they are. An
+  empty picker whose plantillas are all still in Meta's review says so and
+  points at Sincronizar con WhatsApp (template_review_note.html).
 
-  Context: template_options -- [{template, body}]
+  Context: template_options -- [{template, body}], awaiting_review,
+           selected_template, reload_url
 {% endcomment %}
 
 {% if template_options %}
@@ -45,6 +49,8 @@
       </li>
     {% endfor %}
   </ul>
+{% elif awaiting_review %}
+  {% include "partials/inbox/template_review_note.html" with note_class="tpl-pick__empty" %}
 {% else %}
   <p class="tpl-pick__empty">
     No hay plantillas activas. WhatsApp solo permite abrir una conversación con
