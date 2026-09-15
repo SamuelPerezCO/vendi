@@ -26,7 +26,6 @@ from messaging.models import Conversation, Message
 from messaging.providers.fake import FakeProvider
 from messaging.providers.types import InboundEvent
 
-TWO_AGENTS = "Ana:clave-larga-a:Ana,Beto:clave-larga-b:Beto"
 
 
 def inbound(phone="+573001112233", body="hola", mid=None):
@@ -46,6 +45,16 @@ def settings_row(**fields):
         setattr(row, k, v)
     row.save()
     return row
+
+
+class WithAgentsTestCase(TestCase):
+    """Ana and Beto, the agents the rotation goes through -- database users,
+    since logins no longer come from the environment."""
+
+    def setUp(self):
+        super().setUp()
+        agents.create_user("Ana", "clave-larga-a", "Ana")
+        agents.create_user("Beto", "clave-larga-b", "Beto")
 
 
 class WelcomeMessageTests(TestCase):
@@ -116,8 +125,7 @@ class WelcomeMessageTests(TestCase):
         self.assertIsNotNone(Client.objects.get().welcomed_at)
 
 
-@override_settings(APP_AGENTS=TWO_AGENTS, APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
-class AutoAssignTests(TestCase):
+class AutoAssignTests(WithAgentsTestCase):
     def test_off_by_default_conversations_stay_unassigned(self):
         inbound()
         self.assertIsNone(Conversation.objects.get().assigned_to)
@@ -143,8 +151,8 @@ class AutoAssignTests(TestCase):
         first.refresh_from_db()
         self.assertEqual(first.assigned_to.username, "Ana")   # unchanged
 
-    @override_settings(APP_AGENTS="", APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
     def test_with_nobody_to_assign_to_it_leaves_the_chat_alone(self):
+        get_user_model().objects.all().delete()
         settings_row(assign_enabled=True)
         inbound()
         self.assertIsNone(Conversation.objects.get().assigned_to)
@@ -184,8 +192,7 @@ class BienvenidaScreenTests(TestCase):
         self.assertEqual(row.welcome_body, "Hola")
 
 
-@override_settings(APP_AGENTS=TWO_AGENTS, APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
-class AsignacionScreenTests(TestCase):
+class AsignacionScreenTests(WithAgentsTestCase):
     URL = reverse("asignacion_save")
     PAGE = reverse("section", args=["mensajeria"]) + "?view=asignacion-automatica"
 
@@ -202,8 +209,8 @@ class AsignacionScreenTests(TestCase):
         self.client.post(self.URL, {})
         self.assertFalse(MessagingSettings.load().assign_enabled)
 
-    @override_settings(APP_AGENTS="", APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
     def test_enabling_with_no_agents_is_refused(self):
+        get_user_model().objects.all().delete()
         html = self.client.post(self.URL, {"assign_enabled": "1"}).content.decode()
         self.assertIn("No hay agentes", html)
         self.assertFalse(MessagingSettings.load().assign_enabled)

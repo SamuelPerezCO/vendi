@@ -27,16 +27,12 @@ from core.models import (
 )
 from messaging.models import Conversation, ConversationTag, Message, Tag
 
-ONE_AGENT = "Samuel:una-clave-larga:Samuel"
-
-
 def run(*args) -> str:
     out = StringIO()
     call_command("go_live", *args, stdout=out)
     return out.getvalue()
 
 
-@override_settings(APP_AGENTS="", APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD="")
 class GoLiveTests(TestCase):
     """The purge itself."""
 
@@ -138,12 +134,6 @@ class GoLiveTests(TestCase):
         run("--yes")
         self.assertTrue(get_user_model().objects.filter(username="root").exists())
 
-    @override_settings(APP_AGENTS=ONE_AGENT)
-    def test_an_env_configured_agent_is_kept(self):
-        agents.agent_users()  # imports the seed row, as the Inbox does
-        run("--yes")
-        self.assertTrue(get_user_model().objects.filter(username="Samuel").exists())
-
     def test_keep_catalog_leaves_the_catalog(self):
         run("--yes", "--keep-catalog")
         self.assertEqual(Product.objects.count(), 1)
@@ -175,7 +165,6 @@ class StaffAccountsSurviveTests(TestCase):
     the Usuarios page's to manage). go_live must not read that exclusion as
     "delete them" -- it deletes rows, and /admin access means colleague."""
 
-    @override_settings(APP_AGENTS="")
     def test_a_staff_only_account_is_kept(self):
         User = get_user_model()
         staff = User.objects.create_user("adminweb", password="clave-larga")
@@ -185,7 +174,6 @@ class StaffAccountsSurviveTests(TestCase):
         call_command("go_live", "--yes", stdout=StringIO())
         self.assertTrue(User.objects.filter(pk=staff.pk).exists())   # ...but kept
 
-    @override_settings(APP_AGENTS="")
     def test_a_superuser_is_kept(self):
         User = get_user_model()
         root = User.objects.create_superuser("root", password="clave-larga")

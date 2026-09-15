@@ -1,25 +1,22 @@
-"""Turn a password into the hash that goes in ``APP_AGENTS``.
+"""Turn a password into the fingerprint Django stores for it.
 
-``APP_AGENTS`` seeds the first masters into the database (see core/agents.py)
-and its entries carry a password *hash*, so the environment never holds a
-working credential. This is what produces one:
+Every login lives in the database (see core/agents.py), and Django never
+stores a password -- only a salted hash of it. This command prints that hash
+on your own computer, so a password can be set straight in the database
+without the password itself being shared, pasted into a chat or left in a
+shell history:
 
-    python manage.py hashear_clave Samuel --name Samuel
+    python manage.py hashear_clave samuel
 
-It prompts for the password (twice, hidden) unless ``--password`` is given,
-and prints the whole ``usuario:hash:Nombre`` entry ready to paste. With no
-username it prints just the hash.
+It prompts for the password twice, hidden, unless ``--password`` is given,
+applies the same floor as the Usuarios dialog, and prints one line starting
+with the hasher's name (``pbkdf2_sha256$...``). That line is what goes into
+``auth_user.password`` for the account. The usual ways to change a password
+are still the Usuarios page, for a master who can sign in, and
+``manage.py crear_maestro`` when nobody can.
 
-Name every agent at once and it prints the finished variable instead::
-
-    python manage.py hashear_clave Admin Samuel
-    APP_AGENTS=Admin:pbkdf2_sha256$...:Admin,Samuel:pbkdf2_sha256$...:Samuel
-
-which is the whole point: joining the entries by hand is where a stray comma
-locks the team out of a deploy nobody can log into to fix.
-
-The hash uses the project's default hasher, so it is verified by exactly the
-same code path as a database account's password.
+The username is optional; given, it only lets the floor refuse a password
+equal to it.
 """
 
 from getpass import getpass
@@ -31,71 +28,34 @@ from core import agents
 
 
 class Command(BaseCommand):
-    help = "Genera el hash de una contraseña para pegarlo en APP_AGENTS."
+    help = (
+        "Genera el hash de una contraseña para guardarlo directamente en la "
+        "base de datos, sin compartir la contraseña."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "usernames",
-            nargs="*",
+            "username",
+            nargs="?",
+            default="",
             metavar="usuario",
-            help="Con uno, imprime la entrada usuario:hash:Nombre. Con varios, "
-                 "la línea APP_AGENTS= completa. Sin ninguno, solo el hash.",
-        )
-        parser.add_argument(
-            "--name",
-            default=None,
-            help="Nombre visible; por defecto el usuario. Solo con un usuario.",
+            help="Opcional: el usuario de la cuenta, para rechazar una contraseña igual a él.",
         )
         parser.add_argument(
             "--password",
             default=None,
             help="Contraseña. Si la omites se pide por teclado, que es lo recomendable: "
-                 "así no queda en el historial del shell. Solo con un usuario.",
+                 "así no queda en el historial del shell.",
         )
 
-    def handle(self, *args, usernames, name, password, **options):
-        if len(usernames) > 1 and (name or password):
-            raise CommandError(
-                "--name y --password son para un solo usuario; con varios se pide "
-                "cada contraseña por teclado y el nombre visible es el usuario."
-            )
-
-        if len(usernames) > 1:
-            entries = [
-                self._entry(user, user, ask_password(f"Contraseña de {user}: "))
-                for user in usernames
-            ]
-            self.stdout.write("APP_AGENTS=" + ",".join(entries))
-            return
-
-        username = usernames[0] if usernames else ""
+    def handle(self, *args, username, password, **options):
         if password is None:
             password = ask_password()
-        encoded = self._hash(password, username)
-        self.stdout.write(
-            f"{username}:{encoded}:{name or username}" if username else encoded
-        )
-
-    def _entry(self, username, display_name, password) -> str:
-        return f"{username}:{self._hash(password, username)}:{display_name}"
-
-    def _hash(self, password: str, username: str) -> str:
         try:
             agents.validate_password(password, username)
         except agents.WeakPassword as exc:
-            raise CommandError(f"{username or 'la contraseña'}: {exc}" if username else str(exc))
-
-        encoded = make_password(password)
-        # The parser splits APP_AGENTS on these, so a hash containing one
-        # would silently truncate. Django's default PBKDF2 never does; Argon2
-        # puts commas in its parameters, hence the guard rather than trust.
-        if ":" in encoded or "," in encoded:
-            raise CommandError(
-                "El hasher configurado produce un hash con ':' o ',', que son los "
-                "separadores de APP_AGENTS. Usa PBKDF2 (el de Django por defecto) "
-                "para las cuentas del entorno."
-            )
-        return encoded
+            raise CommandError(str(exc))
+        self.stdout.write(make_password(password))
 
 
 def ask_password(prompt: str = "Contraseña: ") -> str:

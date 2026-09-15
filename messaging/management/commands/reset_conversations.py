@@ -45,7 +45,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
-from core.agents import configured_agents
+from core.agents import is_app_user
 from core.models import CalendarEvent, Client
 from messaging.models import Conversation, ConversationTag, Message
 
@@ -159,7 +159,7 @@ class Command(BaseCommand):
         (``CalendarEvent.contact`` is SET_NULL) and are matched by their seed
         title *and* description, so a user's own "Reunión semanal del equipo"
         survives. The demo user goes last, and only when
-        ``asesor`` is not a real login in APP_AGENTS: every FK to it is
+        ``asesor`` is not a real teammate's account: every FK to it is
         SET_NULL, so deleting a name somebody actually uses would quietly
         erase their authorship everywhere instead of failing.
         """
@@ -168,17 +168,19 @@ class Command(BaseCommand):
         events = CalendarEvent.objects.filter(
             title__in=DEMO_EVENT_TITLES, description=DEMO_EVENT_DESCRIPTION
         )
-        # ...unless somebody adopted the name as a real login. APP_AGENTS is
-        # the source of truth for who can sign in, and deleting that row would
-        # silently NULL their attribution on every conversation and message
-        # they ever touched (all the FKs are SET_NULL), with no undo.
+        # ...unless somebody adopted the name as a real login. A teammate's
+        # account is a non-staff row with a password of its own
+        # (core.agents.is_app_user); the old generator's fixture was a staff
+        # account, so /admin worked. Deleting a real account would silently
+        # NULL their attribution on every conversation and message they ever
+        # touched (all the FKs are SET_NULL), with no undo.
         demo_users = get_user_model().objects.filter(username=DEMO_USERNAME)
-        if any(agent.username == DEMO_USERNAME for agent in configured_agents()):
+        if any(is_app_user(user) for user in demo_users):
             demo_users = demo_users.none()
             self.stdout.write(
                 self.style.WARNING(
-                    f"  (el usuario {DEMO_USERNAME!r} está en APP_AGENTS: es un "
-                    f"agente real, no se toca)"
+                    f"  (el usuario {DEMO_USERNAME!r} es una cuenta real del "
+                    f"equipo: no se toca)"
                 )
             )
 

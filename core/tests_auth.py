@@ -2,28 +2,24 @@
 
 TESTING (settings.py) makes the gate a no-op for every other test file, so it
 doesn't have to log in before touching a view. These tests turn that back off
-to exercise the real thing, and pin credentials via override_settings rather
-than relying on whatever a developer's local .env happens to hold.
+to exercise the real thing, signing in with an account created in the
+database -- the only place logins come from.
 """
 
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
+from core import agents
 from core.middleware import SESSION_KEY
 
 CREDS = {"username": "tester", "password": "secret-pw"}
 
 
-# APP_AGENTS="" matters as much as the pair below it: core.agents prefers the
-# agent list whenever it is non-empty, so a developer with APP_AGENTS in their
-# .env would otherwise never reach the legacy credentials these tests pin.
-@override_settings(
-    TESTING=False,
-    APP_AGENTS="",
-    APP_LOGIN_USERNAME="tester",
-    APP_LOGIN_PASSWORD="secret-pw",
-)
+@override_settings(TESTING=False)
 class LoginGateTests(TestCase):
+    def setUp(self):
+        agents.create_user("tester", "secret-pw", "Tester")
+
     def test_unauthenticated_request_redirects_to_login(self):
         response = self.client.get(reverse("home"))
         self.assertRedirects(response, reverse("login"), fetch_redirect_response=False)
@@ -80,9 +76,26 @@ class LoginGateTests(TestCase):
         self.assertRedirects(response, reverse("login"), fetch_redirect_response=False)
 
     def test_blank_credentials_never_satisfy_the_gate(self):
-        with override_settings(APP_LOGIN_USERNAME="", APP_LOGIN_PASSWORD=""):
-            self.client.post(reverse("login"), {"username": "", "password": ""})
+        self.client.post(reverse("login"), {"username": "", "password": ""})
         self.assertNotIn(SESSION_KEY, self.client.session)
+
+    def test_the_retired_env_logins_open_nothing(self):
+        """APP_LOGIN_* once let a pair from the environment in, and APP_AGENTS
+        seeded accounts. Set or not, only database accounts sign in now."""
+        from unittest import mock
+
+        env = {
+            "APP_AGENTS": "Admin:admin-pw:Admin",
+            "APP_LOGIN_USERNAME": "viejo",
+            "APP_LOGIN_PASSWORD": "clave-vieja",
+        }
+        with mock.patch.dict("os.environ", env), override_settings(**env):
+            for username, password in (("viejo", "clave-vieja"), ("Admin", "admin-pw")):
+                with self.subTest(username):
+                    self.client.post(
+                        reverse("login"), {"username": username, "password": password}
+                    )
+                    self.assertNotIn(SESSION_KEY, self.client.session)
 
     def test_provider_webhook_is_reachable_without_a_session(self):
         # Signature-authenticated (see messaging/views.py), not session-gated --

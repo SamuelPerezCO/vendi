@@ -1,9 +1,8 @@
 """App-wide login gate.
 
-Not django.contrib.auth -- there is no user model, signup or password reset.
-It's one shared username/password pair from the environment (APP_LOGIN_USERNAME
-/ APP_LOGIN_PASSWORD, see .env.example), checked in core.views.login_view and
-remembered as a flag in the session. This middleware is what enforces it: any
+Accounts are database users (core/agents.py), checked in core.views.login_view,
+which starts a django.contrib.auth session and sets a flag in it. There is no
+signup or self-service password reset. This middleware is what enforces it: any
 request without that flag is redirected to the login page, except for the
 handful of paths that must stay reachable without a browser session --
 provider webhooks (hit by Meta, authenticated by

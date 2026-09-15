@@ -29,9 +29,7 @@ runs against production and there is no undo):
 Who counts as "the team", and therefore survives:
 
 * anyone holding a real password (:func:`core.agents.is_app_user`): created
-  from CRM > Equipo > Usuarios, or seeded from ``APP_AGENTS`` -- the seed is
-  imported into real rows first (:func:`core.agents.import_env_agents`), so
-  a master named only in the environment survives too
+  from CRM > Equipo > Usuarios or with ``manage.py crear_maestro``
 * any Django superuser
 
 Every other ``User`` row is an assignee-only row -- the ``asesor`` fixture,
@@ -45,8 +43,7 @@ since on a CRM that has never been live it can only be trial data.
 already approved by Meta or the quick replies are the real ones.
 
 What this does **not** touch: uploaded media already in Vercel Blob (the rows
-pointing at it are deleted, the files stay), and the ``APP_AGENTS`` variable
-itself.
+pointing at it are deleted, the files stay).
 """
 
 from __future__ import annotations
@@ -95,10 +92,6 @@ class Command(BaseCommand):
         keep_catalog = options["keep_catalog"]
 
         User = get_user_model()
-        # Seeded agents become real rows before the split, or a master who
-        # exists only in APP_AGENTS would read as a fixture and be dropped.
-        agents.import_env_agents()
-        seeded = {agent.username for agent in agents.configured_agents()}
         # Resolved before anything is deleted: `keep` is what defines the
         # survivors, and after the delete the queryset would be evaluated
         # against rows that no longer exist.
@@ -137,8 +130,6 @@ class Command(BaseCommand):
             for user in keep:
                 name = user.get_full_name() or user.username
                 flags = []
-                if user.username in seeded:
-                    flags.append("semilla APP_AGENTS")
                 if agents.is_master(user):
                     flags.append("maestro")
                 if not user.is_active:
@@ -148,9 +139,9 @@ class Command(BaseCommand):
         else:
             self.stdout.write(
                 self.style.WARNING(
-                    "Ninguna cuenta del equipo sobrevive: no hay nadie en "
-                    "APP_AGENTS ni creado desde CRM > Equipo > Usuarios. Crea "
-                    "tu cuenta antes de correr esto con --yes, o te quedas fuera."
+                    "Ninguna cuenta del equipo sobrevive: nadie tiene contraseña "
+                    "propia ni es superusuario. Crea tu cuenta con manage.py "
+                    "crear_maestro antes de correr esto con --yes, o te quedas fuera."
                 )
             )
         if keep_catalog:
@@ -207,8 +198,7 @@ def _split_team(users) -> tuple[list, list]:
     """Split ``users`` into (team, fixtures).
 
     A row is the team's if it holds a real password (CRM > Equipo > Usuarios
-    created it, or it was seeded from the environment and imported) or if it
-    is a Django superuser. Anything else exists only to be pointed at by
+    or crear_maestro created it) or if it is a Django superuser. Anything else exists only to be pointed at by
     ``assigned_to``: a name a seed script invented.
 
     The demo advisor is named explicitly rather than inferred.

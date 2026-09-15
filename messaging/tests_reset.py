@@ -131,7 +131,12 @@ class DemoOnlyResetTests(TestCase):
             start=timezone.now(), end=timezone.now(),
         )
         User = get_user_model()
-        User.objects.create_user("asesor", password="asesor123")
+        # Exactly what the removed seed_conversations created: a staff account
+        # (so /admin worked) with the printed demo password.
+        User.objects.create_user(
+            "asesor", password="asesor123", first_name="Asesor", last_name="Demo",
+            is_staff=True,
+        )
         self.real_user = User.objects.create_user("samuel", password="x" * 12)
 
     def run_command(self, *args):
@@ -202,21 +207,32 @@ class DemoUserIsProtectedWhenRealTests(TestCase):
         call_command("reset_conversations", "--demo-only", *args, stdout=out)
         return out.getvalue()
 
-    @override_settings(APP_AGENTS="asesor:secreto123:Asesor")
-    def test_a_configured_agent_named_asesor_is_left_alone(self):
+    def test_a_real_teammate_named_asesor_is_left_alone(self):
+        """A non-staff account with a password of its own is somebody's
+        login (core.agents.is_app_user), whatever it is called."""
         from django.contrib.auth import get_user_model
 
         output = self.run_command("--yes")
 
-        self.assertIn("APP_AGENTS", output)
+        self.assertIn("cuenta real", output)
         self.assertTrue(get_user_model().objects.filter(username="asesor").exists())
         self.chat.refresh_from_db()
         self.assertEqual(self.chat.assigned_to, self.user)
 
-    @override_settings(APP_AGENTS="samuel:secreto123:Samuel")
+    def test_a_password_less_asesor_is_a_fixture_and_goes(self):
+        from django.contrib.auth import get_user_model
+
+        self.user.set_unusable_password()
+        self.user.save(update_fields=["password"])
+        self.run_command("--yes")
+        self.assertFalse(get_user_model().objects.filter(username="asesor").exists())
+
     def test_the_leftover_demo_login_still_goes_when_nobody_uses_it(self):
         from django.contrib.auth import get_user_model
 
+        # The old generator's fixture: a staff account, so /admin worked.
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
         self.run_command("--yes")
 
         self.assertFalse(get_user_model().objects.filter(username="asesor").exists())

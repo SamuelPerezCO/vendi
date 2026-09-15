@@ -1,38 +1,44 @@
 """System checks for the app's own configuration.
 
 Run by ``manage.py check``, and by ``runserver`` on every start, so an
-environment that still holds a raw password says so out loud rather than
-waiting to be noticed.
+misconfigured environment says so out loud rather than waiting to be
+noticed.
 """
+
+import os
 
 from django.core.checks import Warning, register
 
 
+#: Environment variables that seeded logins before every account moved into
+#: the database. Nothing reads them any more.
+RETIRED_LOGIN_ENV_VARS = ("APP_AGENTS", "APP_LOGIN_USERNAME", "APP_LOGIN_PASSWORD")
+
+
 @register()
-def plaintext_env_secrets(app_configs, **kwargs):
-    """Warn for every ``APP_AGENTS`` entry still carrying a raw password.
+def retired_login_env_vars(app_configs, **kwargs):
+    """Warn while any retired login variable is still set (core.W004).
 
-    Reading settings only -- no database -- so this is safe to run before
-    migrations, during collectstatic, and in CI.
+    Logins live in the database (core/agents.py) and the CRM no longer reads
+    these. A leftover one is dead weight at best, and at worst a password
+    hash -- or an old raw password -- sitting in the hosting dashboard for
+    anyone who can open it. Only the names are reported, never the values.
+    Reads the process environment directly, because settings no longer
+    define them; no database, so it is safe before migrations and in CI.
     """
-    from . import agents
-
-    plain = [agent.username for agent in agents.configured_agents() if not agent.is_hashed]
-    if not plain:
+    leftover = [name for name in RETIRED_LOGIN_ENV_VARS if os.environ.get(name, "").strip()]
+    if not leftover:
         return []
-
-    names = ", ".join(repr(name) for name in plain)
     return [
         Warning(
-            f"Configured with a plaintext password: {names}.",
+            f"Retired login variables are still set: {', '.join(leftover)}.",
             hint=(
-                "Anyone who can read the environment (the hosting dashboard, a "
-                "CI log, a shared .env) can log in as them. Replace the middle "
-                "field of each APP_AGENTS entry with a hash from "
-                "`manage.py hashear_clave <usuario>`; login accepts either, so "
-                "the swap needs no other change."
+                "Logins live in the database now and the CRM ignores these. "
+                "Delete them from the environment (the Vercel project settings, "
+                "a local .env). If nobody can sign in, `manage.py crear_maestro "
+                "<usuario>` creates or restores a master."
             ),
-            id="core.W001",
+            id="core.W004",
         )
     ]
 
