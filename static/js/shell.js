@@ -159,24 +159,28 @@
    * someone scrolled up reading history must not be yanked back down by a
    * poll. "There" is measured just before the swap, with a small tolerance.
    *
-   * Photos move "the bottom". A photo has no height until it loads, so the
-   * scroll right after a swap lands short of any photo still loading -- one
-   * that just arrived, or a quick reply sent with a picture. The photo then
-   * grows and pushes the newest messages below the fold, and the next poll
-   * finds a reader who is no longer at the bottom and leaves them there for
-   * good. So the thread stays pinned: each photo that finishes loading
-   * scrolls it back down, unless the reader has scrolled since.
+   * Pictures move everything. A photo or sticker has no height until it
+   * loads, and a swap re-inserts every one of them, so right after a swap the
+   * list is shorter than it is about to be -- in a sticker-heavy chat shorter
+   * than the box itself, at which point the browser clamps scrollTop to 0.
+   * The pictures then load, the list grows back by thousands of pixels, and
+   * the view stays wherever the clamp left it: at the first message of the
+   * conversation, on every poll. Chrome's scroll anchoring hides most of
+   * this; Safari has no scroll anchoring at all. inbox.css reserves each
+   * picture's box up front so the list rarely changes height, and this keeps
+   * the reader's place through whatever change remains:
+   *
+   * - pinned: the reader rests at the newest message, and every swap,
+   *   picture load and resize scrolls back to the bottom. Only the reader's
+   *   own input unpins -- the wheel, a touch drag, the scrollbar, a scroll
+   *   key -- never a scrollTop the browser moved by itself.
+   * - anchored: the reader is somewhere else, and the message at the top of
+   *   the view keeps its offset through every swap and resize.
    * ---------------------------------------------------------------------- */
 
-  var chatWasAtBottom = true;
-
-  /* Whether the thread is pinned to the newest message: set whenever a swap
-     scrolls it to the bottom, cleared as soon as the reader scrolls it up.
-     Only the reader's own input clears it. The browser moves scrollTop on its
-     own as well -- scroll anchoring keeps the view steady when a photo above
-     the fold grows -- and reading that as the reader leaving drops the pin
-     exactly when several photos finish loading at once. */
   var chatPinned = false;
+  var chatAnchor = null;  // {id, offset} of the message at the top of the view
+  var chatInputAt = 0;    // when the reader last scrolled the thread themselves
 
   /* How far from the bottom still counts as "at the bottom". This only has to
      absorb sub-pixel rounding -- scrollTop comes back fractional (3821.5 for a
@@ -193,76 +197,187 @@
     return el && el.id === "chat-messages";
   }
 
+  function inChat(node) {
+    return node && node.closest ? node.closest("#chat-messages") : null;
+  }
+
   function nearBottom(box) {
     return box.scrollHeight - box.scrollTop - box.clientHeight < CHAT_BOTTOM_SLACK;
   }
 
-  function pinToBottom(box) {
-    box.scrollTop = box.scrollHeight;
-    chatPinned = true;
+  // The first message still (partly) below the box's top edge, and where its
+  // top sits relative to that edge. Messages carry data-message-id so the
+  // same one can be found again in the swapped-in list. They are in document
+  // order, so a binary search finds it in a handful of rect reads however
+  // long the thread is.
+  function messageAtTop(box) {
+    var top = box.getBoundingClientRect().top;
+    var messages = box.querySelectorAll(".msg[data-message-id]");
+    var low = 0;
+    var high = messages.length - 1;
+    var found = null;
+    while (low <= high) {
+      var mid = (low + high) >> 1;
+      var rect = messages[mid].getBoundingClientRect();
+      if (rect.bottom > top) {
+        found = { id: messages[mid].dataset.messageId, offset: rect.top - top };
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return found;
+  }
+
+  function rememberPlace(box) {
+    chatAnchor = chatPinned ? null : messageAtTop(box);
+  }
+
+  // Once per frame at most: momentum scrolling fires dozens of scroll events
+  // a second, and one anchor per painted frame is all that is ever needed.
+  var placePending = false;
+  function rememberPlaceSoon(box) {
+    if (placePending) return;
+    placePending = true;
+    requestAnimationFrame(function () {
+      placePending = false;
+      if (document.contains(box)) rememberPlace(box);
+    });
+  }
+
+  // Put the view back where the reader had it: the bottom, or the anchored
+  // message at its offset. Idempotent, so it runs after every swap, picture
+  // load and resize, and does nothing wherever the browser already got it
+  // right (Chrome's own anchoring, say).
+  function keepPlace(box) {
+    if (chatPinned) {
+      box.scrollTop = box.scrollHeight;
+      return;
+    }
+    if (!chatAnchor) return;
+    var message = box.querySelector('.msg[data-message-id="' + chatAnchor.id + '"]');
+    if (!message) return;
+    var drift = message.getBoundingClientRect().top - box.getBoundingClientRect().top
+      - chatAnchor.offset;
+    if (Math.abs(drift) >= 1) box.scrollTop += drift;
+  }
+
+  // A photo's placeholder (inbox.css) gives way to the photo once it has
+  // loaded, or failed. Cached pictures can be complete the moment they are
+  // inserted, before any load event reaches us, hence the sweep.
+  function markLoadedPictures(box) {
+    box.querySelectorAll(".msg__image img").forEach(function (img) {
+      if (img.complete) img.parentElement.classList.add("is-loaded");
+    });
+  }
+
+  // Height changes inside the thread -- a picture loading, a placeholder
+  // giving way -- are corrected before they paint. Re-armed after every swap,
+  // since a swap replaces every child. The box itself is watched too: the
+  // composer under it changes height when the 24h window flips.
+  var chatResizes = window.ResizeObserver
+    ? new ResizeObserver(function (entries) {
+        var box = inChat(entries[0].target);
+        if (box) keepPlace(box);
+      })
+    : null;
+
+  function watchChat(box) {
+    if (!chatResizes) return;
+    chatResizes.disconnect();
+    chatResizes.observe(box);
+    box.querySelectorAll(".msg").forEach(function (message) {
+      chatResizes.observe(message);
+    });
+  }
+
+  function settleChat(box) {
+    markLoadedPictures(box);
+    keepPlace(box);
+    watchChat(box);
   }
 
   document.addEventListener("htmx:beforeSwap", function (event) {
-    if (!isChatBox(event.detail.target)) return;
+    var box = event.detail.target;
+    if (!isChatBox(box)) return;
     // The composer posts to this same target, so a send lands here too.
     // Sending is an explicit "show me the newest" -- jump to it wherever the
     // reader was, or their own message arrives off-screen above the fold.
     // Only the 5s poll (a GET) has to leave a scrolled-up reader alone.
     var config = event.detail.requestConfig;
     var sent = config && String(config.verb).toLowerCase() === "post";
-    chatWasAtBottom = sent || nearBottom(event.detail.target);
+    if (sent || nearBottom(box)) chatPinned = true;
+    rememberPlace(box);
   });
 
   document.addEventListener("htmx:afterSwap", function (event) {
-    var box = isChatBox(event.detail.target)
-      ? event.detail.target
-      : event.detail.target.querySelector("#chat-messages"); // thread just opened
+    var target = event.detail.target;
+    var box = isChatBox(target)
+      ? target
+      : target.querySelector && target.querySelector("#chat-messages"); // thread just opened
     if (!box) return;
     // A freshly-opened thread always starts at the newest message.
-    if (!isChatBox(event.detail.target) || chatWasAtBottom) {
-      pinToBottom(box);
-      chatWasAtBottom = true;
-    } else {
-      chatPinned = false;
-    }
+    if (!isChatBox(target)) chatPinned = true;
+    settleChat(box);
   });
 
-  function inChat(node) {
-    return node && node.closest ? node.closest("#chat-messages") : null;
-  }
-
-  // The reader scrolling the thread up: the wheel, a touch drag, the
+  // The reader scrolling the thread themselves: the wheel, a touch drag, the
   // scrollbar (a press on the box itself rather than on a message), or a
-  // scroll key while no text field has focus. Scrolling down, or clicking a
-  // message or a photo, leaves the pin alone.
+  // scroll key while no text field has focus. Upwards unpins; downwards, or
+  // a click on a message or a picture, leaves the pin alone.
+  function readerScrolled(upwards) {
+    chatInputAt = Date.now();
+    if (upwards) chatPinned = false;
+  }
   document.addEventListener("wheel", function (event) {
-    if (event.deltaY < 0 && inChat(event.target)) chatPinned = false;
+    if (inChat(event.target)) readerScrolled(event.deltaY < 0);
   }, { capture: true, passive: true });
   document.addEventListener("touchmove", function (event) {
-    if (inChat(event.target)) chatPinned = false;
+    if (inChat(event.target)) readerScrolled(true);
   }, { capture: true, passive: true });
   document.addEventListener("pointerdown", function (event) {
-    if (isChatBox(event.target)) chatPinned = false;
+    if (isChatBox(event.target)) readerScrolled(true);
   }, true);
   document.addEventListener("keydown", function (event) {
     var target = event.target;
     var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable;
-    if (!typing && ["PageUp", "ArrowUp", "Home"].indexOf(event.key) !== -1) chatPinned = false;
+    if (typing) return;
+    if (["PageUp", "ArrowUp", "Home"].indexOf(event.key) !== -1) readerScrolled(true);
+    if (["PageDown", "ArrowDown", "End", " "].indexOf(event.key) !== -1) readerScrolled(false);
   }, true);
 
-  // load and error do not bubble, hence the capture phase. A photo that fails
-  // still changes its bubble's height: the alt text takes its place.
-  function repinAfterPhoto(event) {
-    if (!chatPinned || !event.target || event.target.tagName !== "IMG") return;
-    var box = inChat(event.target); // null: swapped out before it loaded
-    if (box) box.scrollTop = box.scrollHeight;
+  // scroll does not bubble either. A scroll the reader just made that lands
+  // at the bottom pins the thread again; one the browser made on its own --
+  // the clamp after a swap, a picture growing -- must not, or a reader
+  // partway up would be dragged to the bottom by the next picture to load.
+  document.addEventListener("scroll", function (event) {
+    var box = event.target;
+    if (!isChatBox(box)) return;
+    if (Date.now() - chatInputAt < 500 && nearBottom(box)) chatPinned = true;
+    rememberPlaceSoon(box);
+  }, true);
+
+  // load and error do not bubble, hence the capture phase. A picture that
+  // fails still changes its bubble's height: the alt text takes its place.
+  function pictureSettled(event) {
+    var img = event.target;
+    if (!img || img.tagName !== "IMG") return;
+    var box = inChat(img); // null: swapped out before it loaded
+    if (!box) return;
+    if (img.parentElement.classList.contains("msg__image")) {
+      img.parentElement.classList.add("is-loaded");
+    }
+    keepPlace(box);
   }
-  document.addEventListener("load", repinAfterPhoto, true);
-  document.addEventListener("error", repinAfterPhoto, true);
+  document.addEventListener("load", pictureSettled, true);
+  document.addEventListener("error", pictureSettled, true);
 
   // Full-page load with ?chat= in the URL renders the thread server-side.
   var initialChat = document.getElementById("chat-messages");
-  if (initialChat) pinToBottom(initialChat);
+  if (initialChat) {
+    chatPinned = true;
+    settleChat(initialChat);
+  }
 
   /* -------------------------------------------------------------------------
    * Dialogs (the Etiquetas create/edit modals, the template chooser).

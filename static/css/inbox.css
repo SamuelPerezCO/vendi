@@ -600,7 +600,16 @@
 .msg__media .icon { width: 14px; height: 14px; }
 
 /* Inline photo/sticker: capped like WhatsApp's own thumbnails; the link
-   opens the full-size original in a new tab. */
+   opens the full-size original in a new tab.
+
+   The box is reserved before the picture loads. A picture with no height yet
+   lets the thread's height collapse on every poll (each re-render re-inserts
+   every <img>), and in Safari -- no scroll anchoring -- that lands the reader
+   at the first message of the conversation. Stickers are 512x512, so their
+   <img> carries width/height and the square is there from the start (height
+   auto keeps it square when the bubble is narrower). A photo's size is only
+   known once it loads, so it gets a placeholder of the usual size until then;
+   shell.js marks it loaded and corrects any leftover shift. */
 .msg__image { display: block; }
 .msg__image:not(:last-child) { margin-block-end: 4px; }
 
@@ -609,6 +618,18 @@
   max-width: min(220px, 100%);
   max-height: 220px;
   border-radius: 8px;
+}
+
+.msg__image--sticker img {
+  height: auto;
+  object-fit: contain;
+}
+
+.msg__image--photo:not(.is-loaded) {
+  min-width: min(220px, 100%);
+  min-height: 165px;
+  border-radius: 8px;
+  background: var(--hover-bg);
 }
 
 .msg__meta {

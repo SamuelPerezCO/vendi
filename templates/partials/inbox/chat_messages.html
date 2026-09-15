@@ -3,6 +3,10 @@
   poll and what inbox_send answers with. Inbound bubbles sit left, outbound
   right; outbound carry a delivery-status icon (clock/tick/double tick).
 
+  data-message-id is what shell.js keeps the reader's place by across the
+  poll's re-renders: the message at the top of the view is found again in
+  the swapped-in list and put back at the same offset.
+
   Context: chat_messages, and optionally send_error (from a failed send;
   with send_pending when the send was taken but not confirmed -- an amber
   notice, not a red one, because the advice is *not* to retry)
@@ -10,12 +14,22 @@
 {% load inbox_extras %}
 
 {% for message in chat_messages %}
-  <div class="msg {% if message.is_outbound %}msg--out{% else %}msg--in{% endif %}">
+  <div class="msg {% if message.is_outbound %}msg--out{% else %}msg--in{% endif %}"
+       data-message-id="{{ message.pk }}">
     <div class="msg__bubble">
       {% if message.is_inline_image %}
-        {# Photos and stickers render inline; the link opens the original. #}
-        <a class="msg__image" href="{{ message.media_url }}" target="_blank" rel="noopener">
-          <img src="{{ message.media_url }}" alt="{{ message.body }}" loading="lazy">
+        {% comment %}
+          Photos and stickers render inline; the link opens the original.
+          Both reserve their box before the picture loads (see inbox.css):
+          a picture with no height yet lets the whole list collapse on every
+          poll, which in Safari lands the reader at the first message.
+          Stickers are 512x512, so they carry their size; a photo's size is
+          unknown until it loads, so it gets a placeholder until then.
+        {% endcomment %}
+        <a class="msg__image{% if message.media_type == 'sticker' %} msg__image--sticker{% else %} msg__image--photo{% endif %}"
+           href="{{ message.media_url }}" target="_blank" rel="noopener">
+          <img src="{{ message.media_url }}" alt="{{ message.body }}" loading="lazy"
+               {% if message.media_type == 'sticker' %}width="220" height="220"{% endif %}>
         </a>
       {% elif message.media_url %}
         <a class="msg__media" href="{{ message.media_url }}" target="_blank" rel="noopener">
