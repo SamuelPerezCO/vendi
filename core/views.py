@@ -42,7 +42,6 @@ from django.db.models import Count, Q
 from messaging import pricing
 from messaging import services as messaging_services
 from messaging.models import Conversation, Tag
-from messaging.providers.base import MessagingProvider as MessagingProviderBase
 
 from . import (
     agents,
@@ -991,18 +990,6 @@ def inbox_quick_replies(request, conversation_id: int):
 # --- Enviar plantilla ---------------------------------------------------------
 
 
-def _sendable_templates():
-    """The plantillas the Enviar plantilla dialog offers: active and not
-    rechazada. Pendientes are in -- the MVP has no approval pipeline of its
-    own, so shutting them out would hide every plantilla ever created here;
-    the provider is the authority on whether an unapproved one goes."""
-    return (
-        MessageTemplate.objects.filter(is_active=True)
-        .exclude(status="rechazada")
-        .order_by("name")
-    )
-
-
 def _template_variables(template, values=None) -> list[dict]:
     """One entry per {{n}} in the body with the value its input should show.
 
@@ -1039,7 +1026,8 @@ def _template_send_body_context(conversation, selected=None, values=None, error=
     when the receipt arrives. ``budget`` is the month's running total, plus
     the ceiling when ``MESSAGING_MONTHLY_BUDGET`` sets one.
     """
-    templates = list(_sendable_templates())
+    # messaging.services decides what is on offer -- on Meta, aceptadas only.
+    templates = list(messaging_services.sendable_templates())
     # One window check for the whole dialog: it is the same conversation for
     # every entry, and it changes the price (a utility plantilla inside an
     # open window is billed as a service message).
@@ -1064,9 +1052,14 @@ def _template_send_body_context(conversation, selected=None, values=None, error=
             }
             for template in templates
         ],
-        "selected_id": selected.pk if selected else (templates[0].pk if templates else None),
+        # A refused plantilla is not in the list, so it cannot stay selected.
+        "selected_id": (
+            selected.pk if selected in templates else (templates[0].pk if templates else None)
+        ),
         "send_form_error": error,
         "budget": pricing.budget_state(),
+        # An empty dialog can still mean plantillas exist, waiting on Meta.
+        "awaiting_review": 0 if templates else messaging_services.templates_awaiting_review(),
     }
 
 
@@ -1099,11 +1092,18 @@ def inbox_template_send(request, conversation_id: int):
     if request.method != "POST":
         return HttpResponseNotAllowed(["GET", "POST"])
 
-    template = _sendable_templates().filter(pk=request.POST.get("template") or 0).first()
+    template = MessageTemplate.objects.filter(pk=request.POST.get("template") or 0).first()
     if template is None:
         return _template_send_rejected(
             request, conversation, None, {}, "Elige una plantilla de la lista."
         )
+    try:
+        # Before the variables: a plantilla that cannot go out at all (a
+        # crafted POST, or a dialog left open while a sync changed its
+        # verdict) gets its reason, not a request to fill in its blanks.
+        messaging_services.check_template_sendable(template)
+    except messaging_services.TemplateNotSendable as exc:
+        return _template_send_rejected(request, conversation, None, {}, str(exc))
 
     values = {
         str(number): (request.POST.get(f"var_{template.pk}_{number}") or "").strip()
@@ -1169,11 +1169,12 @@ def _template_send_rejected(request, conversation, template, values, error) -> H
 
 def _template_options():
     """The plantillas the Nuevo chat picker offers, body rendered with its
-    samples for the preview line. The same queryset send_template accepts,
-    so nothing on offer can be refused as not sendable."""
+    samples for the preview line. messaging.services.sendable_templates
+    follows the same rule send_template enforces, so nothing on offer can be
+    refused as not sendable -- on Meta that means aceptadas only."""
     return [
         {"template": template, "body": plantillas.render_body(template)}
-        for template in _sendable_templates()
+        for template in messaging_services.sendable_templates()
     ]
 
 
@@ -1183,9 +1184,16 @@ def _new_chat_response(request, client=None, error=None, template=None):
 
     ``template`` is the plantilla a rejected submit had selected, so the
     re-render comes back on the same one with what was typed still there.
+    Without one -- a first open, or a choice refused as not sendable -- it
+    lands on the first plantilla on offer. The picker checks that radio, so
+    its variable inputs must be on screen too, or the first submit bounces on
+    "completa las variables" for fields that were never shown.
     """
+    options = _template_options()
     values = None
-    if template is not None and request.method == "POST":
+    if template is None:
+        template = options[0]["template"] if options else None
+    elif request.method == "POST":
         values = {
             str(entry["number"]): (
                 request.POST.get(f"var_{template.pk}_{entry['number']}") or ""
@@ -1198,7 +1206,11 @@ def _new_chat_response(request, client=None, error=None, template=None):
             {
                 "clients": Client.objects.order_by("first_name", "last_name"),
                 "selected_client": client,
-                "template_options": _template_options(),
+                "template_options": options,
+                # An empty picker can still mean plantillas exist, waiting on Meta.
+                "awaiting_review": (
+                    0 if options else messaging_services.templates_awaiting_review()
+                ),
                 "selected_template": template,
                 "new_chat_url": reverse("inbox_new_chat"),
                 "template_variables": (
@@ -1223,32 +1235,30 @@ def inbox_new_chat(request):
     """
     if request.method == "GET":
         client = Client.objects.filter(pk=request.GET.get("cliente") or 0).first()
-        # The picker checks the first plantilla when none is named, so the
-        # body must render THAT one's variable inputs too -- otherwise a
-        # first open shows a checked radio and no inputs, and the first
-        # submit bounces on "completa las variables" for fields that were
-        # never on screen.
-        sendable = _sendable_templates()
+        # None when nothing on offer is named; _new_chat_response then lands
+        # on the first plantilla, the one the picker checks.
         chosen = (
-            sendable.filter(pk=request.GET.get("plantilla") or 0).first()
-            or sendable.first()
+            messaging_services.sendable_templates()
+            .filter(pk=request.GET.get("plantilla") or 0)
+            .first()
         )
         return _new_chat_response(request, client, None, chosen)
     if request.method != "POST":
         return HttpResponseNotAllowed(["GET", "POST"])
 
     client = Client.objects.filter(pk=request.POST.get("cliente") or 0).first()
-    template = (
-        MessageTemplate.objects.filter(
-            pk=request.POST.get("plantilla") or 0, is_active=True
-        )
-        .exclude(status="rechazada")
-        .first()
-    )
+    template = MessageTemplate.objects.filter(pk=request.POST.get("plantilla") or 0).first()
     if client is None:
         return _new_chat_response(request, None, "Elige a quién escribirle.")
     if template is None:
         return _new_chat_response(request, client, "Elige una plantilla para abrir la conversación.")
+    try:
+        # Before the variables and before start_conversation: a plantilla
+        # that cannot go out (a crafted POST, or a pendiente on Meta) gets its
+        # reason and leaves no empty thread behind.
+        messaging_services.check_template_sendable(template)
+    except messaging_services.TemplateNotSendable as exc:
+        return _new_chat_response(request, client, str(exc))
 
     # The agent fills the plantilla's {{n}} for THIS client; the editor's
     # samples are examples for Meta's reviewer, not a greeting for a stranger.
@@ -2292,7 +2302,7 @@ def plantillas_sync(request):
     except Exception as exc:
         notice = f"No se pudo consultar a WhatsApp: {exc}"
     else:
-        if type(provider).template_verdicts is MessagingProviderBase.template_verdicts:
+        if not messaging_services.provider_keeps_catalogue(provider):
             # Inherited the base no-op: there is nothing to consult.
             notice = (
                 f"El proveedor activo ({provider.name}) no tiene catálogo de "

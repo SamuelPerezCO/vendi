@@ -1,0 +1,19 @@
+{% comment %}
+  Why a send dialog is empty when plantillas do exist: on a provider with a
+  template catalogue (Meta) only aceptadas can be sent, and these are still
+  waiting for Meta's verdict. "Sincronizar con WhatsApp" on the Plantillas
+  page is what brings an approval in. Shown in the empty state of both
+  pickers -- template_list.html (Nuevo chat) and template_send_body.html
+  (Enviar plantilla) -- instead of "no hay plantillas".
+
+  Context: awaiting_review -- how many active plantillas are pendiente
+           (messaging.services.templates_awaiting_review);
+           note_class -- the including picker's empty-state class
+{% endcomment %}
+<p class="{{ note_class }}">
+  {{ awaiting_review }} plantilla{{ awaiting_review|pluralize }} en revisión de Meta.
+  WhatsApp no deja enviar{{ awaiting_review|pluralize:"la,las" }} hasta que Meta
+  {{ awaiting_review|pluralize:"la,las" }} apruebe: pulsa «Sincronizar con WhatsApp» en
+  <a href="{% url 'section' 'mensajeria' %}?view=plantillas-whatsapp">Plantillas de WhatsApp</a>
+  para traer su estado.
+</p>

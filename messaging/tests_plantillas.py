@@ -153,6 +153,17 @@ class ProviderDefaultsTests(TestCase):
         self.assertEqual(fake.template_verdicts(), [])
         self.assertIs(type(fake).template_verdicts, MessagingProvider.template_verdicts)
 
+    def test_only_a_provider_that_reads_verdicts_keeps_a_catalogue(self):
+        self.assertFalse(services.provider_keeps_catalogue(FakeProvider()))
+        self.assertTrue(services.provider_keeps_catalogue(MetaProvider()))
+
+    @override_settings(MESSAGING_PROVIDER="meta")
+    def test_the_active_provider_is_checked_without_calling_meta(self):
+        # No META_WABA_ID here: asking Meta would raise, checking the class does not.
+        with patch.object(MetaProvider, "template_verdicts") as verdicts:
+            self.assertTrue(services.provider_keeps_catalogue())
+        verdicts.assert_not_called()
+
 
 @override_settings(
     META_ACCESS_TOKEN="test-token",
@@ -397,7 +408,8 @@ class SendTemplateTests(TestCase):
             services.send_template(chat, plantilla(is_active=False), {"1": "a", "2": "b"})
 
     def test_a_pendiente_plantilla_goes_through(self):
-        # No approval pipeline of our own -- the provider decides.
+        # The fake provider keeps no catalogue, so nothing will ever approve
+        # the plantilla: it goes through. On Meta it would not (see below).
         chat = conversation()
         message = services.send_template(chat, plantilla(status="pendiente"), {"1": "a", "2": "b"})
         self.assertIsNotNone(message.pk)
@@ -410,3 +422,46 @@ class SendTemplateTests(TestCase):
         message = Message.objects.get()
         self.assertEqual(message.status, "failed")
         self.assertIsNone(message.provider_message_id)
+
+
+@override_settings(MESSAGING_PROVIDER="meta")
+class CatalogueGateTests(TestCase):
+    """On a provider with a template catalogue only aceptadas send. Meta
+    answers any other name with 132001, "Template name does not exist in the
+    translation", so the service refuses first: no row, no Graph call."""
+
+    def test_a_pendiente_is_refused_before_any_row_or_provider_call(self):
+        chat = conversation()
+        entry = plantilla(name="prueba_texto", status="pendiente")
+        with patch.object(MetaProvider, "send_template") as send:
+            with self.assertRaises(services.TemplateNotSendable) as caught:
+                services.send_template(chat, entry, {"1": "a", "2": "b"})
+        send.assert_not_called()
+        self.assertIn("«prueba_texto» sigue en revisión de Meta", str(caught.exception))
+        self.assertIn("Sincronizar con WhatsApp", str(caught.exception))
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_a_rechazada_keeps_its_own_reason(self):
+        with self.assertRaises(services.TemplateNotSendable) as caught:
+            services.check_template_sendable(plantilla(status="rechazada"))
+        self.assertIn("rechazó", str(caught.exception))
+
+    def test_an_aceptada_goes_out(self):
+        chat = conversation()
+        with patch.object(MetaProvider, "send_template", return_value="wamid.OK") as send:
+            message = services.send_template(chat, plantilla(), {"1": "a", "2": "b"})
+        send.assert_called_once()
+        self.assertEqual(message.provider_message_id, "wamid.OK")
+
+    def test_awaiting_review_counts_active_pendientes_only(self):
+        plantilla(name="a", status="pendiente")
+        plantilla(name="b", status="pendiente")
+        plantilla(name="c", status="pendiente", is_active=False)
+        plantilla(name="d", status="rechazada")
+        plantilla(name="e", status="aceptada")
+        self.assertEqual(services.templates_awaiting_review(), 2)
+
+    @override_settings(MESSAGING_PROVIDER="fake")
+    def test_without_a_catalogue_nothing_awaits_review(self):
+        plantilla(status="pendiente")
+        self.assertEqual(services.templates_awaiting_review(), 0)

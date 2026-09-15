@@ -6,7 +6,7 @@ editor handing a freshly saved plantilla to the provider."""
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -14,6 +14,7 @@ from core.models import Client, MessageTemplate
 from messaging import services
 from messaging.models import Conversation, Message
 from messaging.providers.fake import FakeProvider
+from messaging.providers.meta import MetaProvider
 from messaging.providers.types import TemplateStatus, TemplateVerdict
 
 HTMX = {"HX-Request": "true"}
@@ -146,8 +147,86 @@ class TemplateSendDialogTests(ConversationMixin, TestCase):
         self.assertContains(response, "No se pudo enviar la plantilla")
         self.assertEqual(Message.objects.get().status, "failed")
 
+    def test_without_a_catalogue_a_pendiente_still_sends(self):
+        # The fake provider can never approve anything, so it keeps the
+        # lenient default rather than making every plantilla unusable.
+        entry = plantilla(body="Hola.", samples=(), status="pendiente")
+        response = self.client.post(self.url, {"template": entry.pk}, headers=HTMX)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Message.objects.get().body, "Hola.")
+
     def test_other_methods_are_not_allowed(self):
         self.assertEqual(self.client.put(self.url).status_code, 405)
+
+
+@override_settings(MESSAGING_PROVIDER="meta")
+class TemplateSendDialogOnMetaTests(ConversationMixin, TestCase):
+    """On Meta only aceptadas go out: Meta treats any other name as
+    nonexistent (132001, "template name (prueba_texto) does not exist in
+    es"). The fake provider's lenient default is TemplateSendDialogTests."""
+
+    def setUp(self):
+        self.chat = self.make_conversation()
+        self.url = reverse("inbox_template_send", args=[self.chat.pk])
+
+    def test_only_aceptadas_are_offered(self):
+        plantilla(name="pedido_listo")
+        plantilla(name="prueba_texto", status="pendiente")
+        html = self.client.get(self.url, headers=HTMX).content.decode()
+        self.assertIn("pedido_listo", html)
+        self.assertNotIn("prueba_texto", html)
+        self.assertNotIn("pendiente de aprobación", html)
+
+    def test_only_pendientes_explains_the_wait_and_points_at_the_sync(self):
+        plantilla(name="prueba_texto", status="pendiente")
+        html = self.client.get(self.url, headers=HTMX).content.decode()
+        self.assertIn("1 plantilla en revisión de Meta", html)
+        self.assertIn("Sincronizar con WhatsApp", html)
+        self.assertIn("view=plantillas-whatsapp", html)
+        self.assertNotIn("No hay plantillas activas", html)
+        self.assertNotIn('type="submit"', html)
+
+    def test_rechazadas_and_inactive_pendientes_are_not_awaiting_review(self):
+        plantilla(name="mala", status="rechazada")
+        plantilla(name="apagada", status="pendiente", is_active=False)
+        html = self.client.get(self.url, headers=HTMX).content.decode()
+        self.assertIn("No hay plantillas activas", html)
+        self.assertNotIn("en revisión de Meta", html)
+
+    def test_a_crafted_post_for_a_pendiente_is_refused_before_meta_hears_of_it(self):
+        entry = plantilla(name="prueba_texto", status="pendiente")
+        with patch.object(MetaProvider, "send_template") as send:
+            response = self.client.post(self.url, {"template": entry.pk}, headers=HTMX)
+        send.assert_not_called()
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response["HX-Retarget"], "#tpl-send-body")
+        self.assertContains(
+            response, "«prueba_texto» sigue en revisión de Meta", status_code=422
+        )
+        # The reason comes before the blanks: filling them would not help.
+        self.assertNotContains(response, "Completa todas las variables", status_code=422)
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_a_crafted_post_for_a_rechazada_says_it_was_rejected(self):
+        entry = plantilla(status="rechazada")
+        response = self.client.post(self.url, {"template": entry.pk}, headers=HTMX)
+        self.assertEqual(response.status_code, 422)
+        self.assertContains(response, "WhatsApp rechazó esta plantilla", status_code=422)
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_a_refusal_comes_back_on_a_plantilla_that_is_on_offer(self):
+        on_offer = plantilla(name="pedido_listo")
+        pending = plantilla(name="prueba_texto", status="pendiente")
+        response = self.client.post(self.url, {"template": pending.pk}, headers=HTMX)
+        self.assertContains(response, f'<option value="{on_offer.pk}" selected>', status_code=422)
+
+    def test_an_aceptada_still_goes_out(self):
+        entry = plantilla(body="Hola.", samples=())
+        with patch.object(MetaProvider, "send_template", return_value="wamid.OK") as send:
+            response = self.client.post(self.url, {"template": entry.pk}, headers=HTMX)
+        send.assert_called_once()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Message.objects.get().provider_message_id, "wamid.OK")
 
 
 class PlantillasSyncTests(TestCase):

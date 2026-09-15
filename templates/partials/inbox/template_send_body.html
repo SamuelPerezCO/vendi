@@ -14,8 +14,14 @@
   month's running total sits once at the bottom. Both come from
   messaging.pricing via core.views._template_send_body_context.
 
+  What is on offer is messaging.services.sendable_templates: on Meta,
+  aceptadas only. The "pendiente de aprobación" suffix and caveat below only
+  ever show on a provider without a catalogue (fake). An empty list whose
+  plantillas are all still in Meta's review says so instead of "no hay
+  plantillas" (template_review_note.html).
+
   Context: entries -- [{template, variables: [{number, value}], quote}],
-  selected_id, send_form_error, budget
+  selected_id, send_form_error, budget, awaiting_review
 {% endcomment %}
 
 {% if entries %}
@@ -80,6 +86,8 @@
     El precio es una estimación: WhatsApp cobra al entregar.
   </p>
 
+{% elif awaiting_review %}
+  {% include "partials/inbox/template_review_note.html" with note_class="tpl-send__empty" %}
 {% else %}
   <p class="tpl-send__empty">
     No hay plantillas activas para enviar. Créalas en
